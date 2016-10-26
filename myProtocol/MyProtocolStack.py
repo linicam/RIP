@@ -29,10 +29,12 @@ from twisted.internet.protocol import Protocol, Factory
 DEFAULT_WINDOW_SIZE = 5
 DEFAULT_SEGMENT_SIZE = 2048
 
+# !IMPORTANT
+# HARD CODE HERE
 with open("./keys/20164_signed.cert") as f:
     rootCertData = f.read()
 rootCert = X509Certificate.loadPEM(rootCertData)
-priKey = RSA.importKey(CertFactory.getPrivateKeyForAddr("./keys/private.key"))
+priKey = RSA.importKey(CertFactory.getPrivateKeyForAddr())
 
 clientNonce = random.randint(0, 65535)
 DEFAULT_CLIENT_SESSION = str(clientNonce) + str(random.randint(0, 65535))
@@ -129,10 +131,9 @@ class MyServerProtocol(StackingProtocolMixin, Protocol):
         self.__storage = MessageStorage()
         self.setupServerSM()
 
-        with open("./keys/wli_signed.cert") as f:
-            self.myCertData = f.read()
-        with open("./keys/wenjunli_signed.cert") as f:
-            self.CACertData = f.read()
+        certs = CertFactory.getCertsForAddr()
+        self.myCertData = certs[0]
+        self.CACertData = certs[1]
 
         self.__buffer = ""  # for data received
         self.__bufCount = 0  # for count packet until it reachs WindowSize
@@ -479,7 +480,7 @@ class MyClientProtocol(StackingProtocolMixin, Protocol):
         self.setupClientSM()
         # self.__timer = threading.Timer(3, self.resendHS, self.sm.currentState())
 
-        certs = CertFactory.getCertsForAddr(["./keys/wli_signed.cert", "./keys/wenjunli_signed.cert"])
+        certs = CertFactory.getCertsForAddr()
         self.myCertData = certs[0]
         self.CACertData = certs[1]
 
