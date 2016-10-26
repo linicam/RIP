@@ -103,7 +103,7 @@ class MyServerTransport(StackingTransport):
         self.__timer.start()
 
     def stopTimer(self):
-        hasattr(self, "__timer") and self.__timer.cancel()
+        self.__timer and self.__timer.cancel()
 
     def reSendDataPacket(self):
         self.lowerTransport().write(self.__dataPacket)
@@ -162,7 +162,7 @@ class MyServerProtocol(StackingProtocolMixin, Protocol):
         self.__timer.start()
 
     def stopTimer(self):
-        hasattr(self, "__timer") and self.__timer.cancel()
+        self.__timer and self.__timer.cancel()
 
     def reSendLastPacket(self):
         # print "[RESNED]"
@@ -438,7 +438,7 @@ class MyClientTransport(StackingTransport):
         self.__timer.start()
 
     def stopTimer(self):
-        hasattr(self, "__timer") and self.__timer.cancel()
+        self.__timer and self.__timer.cancel()
 
     def buildDataPacket(self, seq, data, push=False):
         packet = MyMessage()
@@ -518,7 +518,7 @@ class MyClientProtocol(StackingProtocolMixin, Protocol):
         self.__timer.start()
 
     def stopTimer(self):
-        hasattr(self, "__timer") and self.__timer.cancel()
+        self.__timer and self.__timer.cancel()
 
     def resendHS(self, cState):
         if cState == state.SNN_SENT:
@@ -543,8 +543,6 @@ class MyClientProtocol(StackingProtocolMixin, Protocol):
 
     def dataReceived(self, data):
         # self.stopTimer()
-        print data
-        print self.transport.getHost()  # my IP
         self.__buffer += data
         while self.__buffer:
             msg, byte = MyMessage.Deserialize(self.__buffer)
