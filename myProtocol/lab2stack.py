@@ -10,6 +10,9 @@
 # If the client uses loseConnection() before data transmitted, server will immediately change to CLOSE_RECV state, and
 # send the ack of Close, otherwise when loseConnection() is called, all data must be transmitted since after received
 # ack it will start loseConnection()
+
+# PROBLEM:
+# Once a connection ends, restart it can not connect to the server, you have to close the terminal and open a new one
 import threading
 from Crypto.Hash import SHA256
 from Crypto.PublicKey import RSA
@@ -24,7 +27,7 @@ from playground.network.common.statemachine import StateMachine
 from playground.network.message.ProtoBuilder import MessageDefinition
 from playground.network.message.StandardMessageSpecifiers import STRING, UINT4, BOOL1, DEFAULT_VALUE, LIST, OPTIONAL, \
     UINT1
-from twisted.internet.protocol import Protocol, Factory
+from twisted.internet.protocol import Protocol, Factory, ClientFactory, ServerFactory
 
 DEFAULT_WINDOW_SIZE = 5
 DEFAULT_SEGMENT_SIZE = 2048
@@ -151,7 +154,12 @@ class MyServerProtocol(StackingProtocolMixin, Protocol):
         self.sm.start(state.LISTENING)
 
     def onClose(self, signal, data):
-        self.higherTransport.loseConnection()
+        self.transport.loseConnection()
+
+    def connectionLost(self, reason):
+        if reason.getErrorMessage() == "Connection was closed cleanly.":
+            self.higherTransport.loseConnection()
+            self.higherProtocol().connectionLost(reason)
 
     def connectionMade(self):
         self.higherTransport = MyServerTransport(self.transport)
@@ -361,7 +369,7 @@ class MyServerProtocol(StackingProtocolMixin, Protocol):
         print '[' + type + ']: ' + msg
 
 
-class MyServerFactory(StackingFactoryMixin, Factory):
+class MyServerFactory(StackingFactoryMixin, ServerFactory):
     # FixedKey = "PASSWORD"
     protocol = MyServerProtocol
 
@@ -371,9 +379,9 @@ class MyServerFactory(StackingFactoryMixin, Factory):
 
 
 class MyClientTransport(StackingTransport):
-    __resendsSeq = [] # store currently sent packets' SeqNum
-    __resendsValue = [] # store currently sent packets' data
-    __lastAckNum = 0 # store the next AckNum, so if the received AckNum smaller than it, some packets should be resent
+    __resendsSeq = []  # store currently sent packets' SeqNum
+    __resendsValue = []  # store currently sent packets' data
+    __lastAckNum = 0  # store the next AckNum, so if the received AckNum smaller than it, some packets should be resent
 
     def __init__(self, lowerTransport, initSeqNum, protocol):
         self.__initPacketSN = initSeqNum
@@ -510,7 +518,6 @@ class MyClientProtocol(StackingProtocolMixin, Protocol):
     def onClose(self, signal, data):
         print '[CLOSED]'
         self.transport.loseConnection()
-        self.higherProtocol().connectionLost("normal end")
         # self.higherTransport.loseConnection()
 
     def startTimer(self):
@@ -527,10 +534,14 @@ class MyClientProtocol(StackingProtocolMixin, Protocol):
     def connectionMade(self):
         self.sendFHSPacket()
 
+    def connectionLost(self, reason):
+        if reason.getErrorMessage() == "Connection was closed cleanly.":
+            self.higherProtocol().connectionLost(reason)
+
     def sendFHSPacket(self):
         self.transport.write(self.buildFHSPacket().__serialize__())
         not self.sm.started() and self.sm.start(state.SNN_SENT)
-        # self.startTimer()
+        self.startTimer()
 
     def buildFHSPacket(self):
         initialMsg = MyMessage()
@@ -542,7 +553,7 @@ class MyClientProtocol(StackingProtocolMixin, Protocol):
         return initialMsg
 
     def dataReceived(self, data):
-        # self.stopTimer()
+        self.stopTimer()
         self.__buffer += data
         while self.__buffer:
             msg, byte = MyMessage.Deserialize(self.__buffer)
@@ -643,8 +654,12 @@ class MyClientProtocol(StackingProtocolMixin, Protocol):
         print '[' + type + ']: ' + msg
 
 
-class MyClientFactory(StackingFactoryMixin, Factory):
+class MyClientFactory(StackingFactoryMixin, ClientFactory):
     protocol = MyClientProtocol
+
+    def clientConnectionLost(self, connector, reason):
+        print('Lost connection.  Reason:', reason)
+        # reactor.stop()
 
 
 # ------------------------------------------

@@ -16,6 +16,8 @@ class httpServer(protocol.Protocol):
         print 'success:' + data
         self.transport.write(data)
 
+    def connectionLost(self, reason):
+        print reason
 
 class httpServerFactory(protocol.Factory):
     def buildProtocol(self, addr):
