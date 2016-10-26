@@ -1,4 +1,4 @@
-from myProtocol import MyProtocolStack
+from myProtocol import lab2stack
 from playground.twisted.endpoints import GateServerEndpoint
 from twisted.internet import protocol
 from twisted.internet import reactor
@@ -23,7 +23,7 @@ class httpServerFactory(protocol.Factory):
 
 
 def main():
-    endpoint = GateServerEndpoint.CreateFromConfig(reactor, 19090, 'gatekey1', networkStack=MyProtocolStack)
+    endpoint = GateServerEndpoint.CreateFromConfig(reactor, 19090, 'gatekey1', networkStack=lab2stack)
     endpoint.listen(httpServerFactory())
     reactor.run()
 

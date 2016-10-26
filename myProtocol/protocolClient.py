@@ -1,7 +1,7 @@
 import sys
 from twisted.internet.protocol import ReconnectingClientFactory
 
-from myProtocol import MyProtocolStack
+from myProtocol import lab2stack
 from playground.twisted.endpoints import GateClientEndpoint
 from twisted.internet import reactor, protocol, stdio
 from twisted.protocols.basic import LineReceiver
@@ -36,7 +36,7 @@ class httpClientFactory(protocol.ClientFactory):
     def clientConnectionFailed(self, connector, reason):
         print('Connection failed. Reason:', reason)
         reactor.stop()
-        ReconnectingClientFactory.clientConnectionFailed(self, connector, reason)
+        # ReconnectingClientFactory.clientConnectionFailed(self, connector, reason)
 
     def clientConnectionLost(self, connector, reason):
         print('Lost connection.  Reason:', reason)
@@ -59,6 +59,6 @@ global client
 client = httpClient()
 stdio.StandardIO(stdIO())
 endpoint = GateClientEndpoint.CreateFromConfig(reactor, '20164.1.3414.2414', 19090, 'gatekey1',
-                                               networkStack=MyProtocolStack)
+                                               networkStack=lab2stack)
 endpoint.connect(httpClientFactory())
 reactor.run()
