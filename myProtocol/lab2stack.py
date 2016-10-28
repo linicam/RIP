@@ -12,7 +12,10 @@
 # ack it will start loseConnection()
 
 # PROBLEM:
-# Once a connection ends, restart it can not connect to the server, you have to close the terminal and open a new one
+# Once a connection ends, restart client in IDE can not connect to the server, unless restart the server
+# timer in clientTransport seems not stopped
+# no recovery
+import os
 import threading
 from Crypto.Hash import SHA256
 from Crypto.PublicKey import RSA
@@ -27,7 +30,9 @@ from playground.network.common.statemachine import StateMachine
 from playground.network.message.ProtoBuilder import MessageDefinition
 from playground.network.message.StandardMessageSpecifiers import STRING, UINT4, BOOL1, DEFAULT_VALUE, LIST, OPTIONAL, \
     UINT1
-from twisted.internet.protocol import Protocol, Factory, ClientFactory, ServerFactory
+from twisted.internet import error
+from twisted.internet.protocol import Protocol, ClientFactory, ServerFactory
+from twisted.python import failure
 
 DEFAULT_WINDOW_SIZE = 5
 DEFAULT_SEGMENT_SIZE = 2048
@@ -39,8 +44,12 @@ with open("./keys/20164_signed.cert") as f:
 rootCert = X509Certificate.loadPEM(rootCertData)
 priKey = RSA.importKey(CertFactory.getPrivateKeyForAddr())
 
-clientNonce = random.randint(0, 65535)
-DEFAULT_CLIENT_SESSION = str(clientNonce) + str(random.randint(0, 65535))
+clientNonce = os.urandom(8).encode('hex')  # random.randint(0, 65535)
+serverNonce = os.urandom(8).encode('hex')
+DEFAULT_CLIENT_SESSION = str(clientNonce) + str(serverNonce)
+
+connectionDone = failure.Failure(error.ConnectionDone())
+connectionDone.cleanFailure()
 
 
 class MyMessage(MessageDefinition):
@@ -77,6 +86,7 @@ class state(object):
 
 
 class signal(object):
+    SYN_SEND = "SNN sent"
     ACK_RECEIVED = "Acknowledgement received"
     CLOSE = "Close"
     CLOSE_REQ = "Close request"
@@ -99,16 +109,16 @@ class MyServerTransport(StackingTransport):
 
     def __init__(self, lowerTransport):
         StackingTransport.__init__(self, lowerTransport)
-        self.__timer = threading.Timer(3, self.reSendDataPacket)
+        self.__timer = threading.Timer(3, self.reSendAckPacket)
 
     def startTimer(self):
-        self.__timer = threading.Timer(3, self.reSendDataPacket)
+        self.__timer = threading.Timer(3, self.reSendAckPacket)
         self.__timer.start()
 
     def stopTimer(self):
         self.__timer and self.__timer.cancel()
 
-    def reSendDataPacket(self):
+    def reSendAckPacket(self):
         self.lowerTransport().write(self.__dataPacket)
 
     def write(self, packet):
@@ -127,7 +137,7 @@ class MyServerTransport(StackingTransport):
 
 
 class MyServerProtocol(StackingProtocolMixin, Protocol):
-    __serverInitialSN = random.randint(0, 1000)
+    __serverInitialSN = random.randint(0, pow(2, 32))
 
     def __init__(self):
         self.sm = StateMachine("ServerStateMachine")
@@ -156,7 +166,7 @@ class MyServerProtocol(StackingProtocolMixin, Protocol):
     def onClose(self, signal, data):
         self.transport.loseConnection()
 
-    def connectionLost(self, reason):
+    def connectionLost(self, reason=connectionDone):
         if reason.getErrorMessage() == "Connection was closed cleanly.":
             self.higherTransport.loseConnection()
             self.higherProtocol().connectionLost(reason)
@@ -201,9 +211,11 @@ class MyServerProtocol(StackingProtocolMixin, Protocol):
             elif self.sm.currentState() == state.LISTENING:  # handshake phase 1
                 if not self.processHSFirst(msg):
                     return
+                self.sm.signal(signal.SYN_RECEIVED, msg)
             elif self.sm.currentState() == state.SNN_RECV:  # handshake phase 3
                 if not self.processHSThird(msg):
                     return
+                self.sm.signal(signal.ACK_RECEIVED, msg)
             elif self.sm.currentState() == state.ESTABLISHED:
                 if msg.CloseFlag:
                     print '[CLOSED]'
@@ -242,7 +254,6 @@ class MyServerProtocol(StackingProtocolMixin, Protocol):
         self.transport.write(self.sendSHSPacket(msg).__serialize__())
         self.__lastPacket = self.sendSHSPacket(msg).__serialize__()
         self.startTimer()
-        self.sm.signal(signal.SYN_RECEIVED, msg)
         return True
 
     def processHSThird(self, msg):
@@ -251,7 +262,6 @@ class MyServerProtocol(StackingProtocolMixin, Protocol):
             return False
         if msg.SeqNumNotiFlag:
             self.__clientISN = msg.SeqNum
-        self.sm.signal(signal.ACK_RECEIVED, msg)
         self.__lastAckNum = self.__clientISN + self.segSize + 1
         print '[ESTABLISHED]'
         return True
@@ -301,10 +311,10 @@ class MyServerProtocol(StackingProtocolMixin, Protocol):
             self.log(errType.HANDSHAKE, "checkCerts false")
             return False
         # get server's nonce
-        if msg.SessionID[:len(msg.Cert[0])] != str(msg.Cert[0]):
+        if msg.SessionID[:len(msg.Cert[0])] != msg.Cert[0]:
             self.log(errType.HANDSHAKE, "wrong client nonce")
             return False
-        self.serverNonce = int(msg.SessionID[len(msg.Cert[0]):])
+        self.serverNonce = msg.SessionID[len(msg.Cert[0]):]
         return True
 
     def sendSHSPacket(self, msg):
@@ -315,12 +325,12 @@ class MyServerProtocol(StackingProtocolMixin, Protocol):
         msgToSend.AckFlag = True
         msgToSend.WindowSize = self.windowSize
         msgToSend.MaxSegSize = self.segSize
-        msgToSend.Cert = [self.serverNonce, buildSign(str(int(msg.Cert[0]) + 1)), self.myCertData, self.CACertData]
+        msgToSend.Cert = [self.serverNonce, str(hex(int(msg.Cert[0], 16) + 1)), self.myCertData, self.CACertData]
         msgToSend.Signature = buildSign(msgToSend.__serialize__())
         return msgToSend
 
     def checkTHSPacket(self, msg):
-        if not checkSign(self.clientPubKey, str(self.serverNonce + 1), msg.Cert[0]):
+        if not str(hex(int(self.serverNonce, 16) + 1)) == msg.Cert[0]:
             self.log(errType.HANDSHAKE, "wrong signature")
             return False
         return True
@@ -407,20 +417,19 @@ class MyClientTransport(StackingTransport):
     def loseConnection(self):
         self.lowerTransport().write(self.buildClosePacket(self.__initPacketSN).__serialize__())
         self.__protocol.setSMCloseReq()
-        self.startTimer(1)
+        # self.startTimer(1)
 
     def sendMsg(self, ackNum):
-        self.stopTimer()
+        # self.stopTimer()
         self.__resendsSeq = []
         self.__resendsValue = []
         pushFlag = False
-        if not ackNum:
-            start = 0
-        else:
+        start = 0
+        if ackNum:
             # print 'line 346:' + str(ackNum) + '--' + str(self.__lastAckNum)
             if ackNum < self.__lastAckNum:
                 self.reSendDataPacket(ackNum)
-                self.startTimer()
+                # self.startTimer()
                 return
             else:
                 try:
@@ -435,7 +444,7 @@ class MyClientTransport(StackingTransport):
                 self.__resendsSeq.append(self.__dataSeqs[i])
                 self.__resendsValue.append(self.__dataValues[i])
                 self.lowerTransport().write(packet.__serialize__())
-        self.startTimer()
+        # self.startTimer()
         self.__lastAckNum = start + self.windowSize < len(self.__dataSeqs) and self.__dataSeqs[start + self.windowSize]
 
     def startTimer(self, state=0):
@@ -459,7 +468,7 @@ class MyClientTransport(StackingTransport):
         return packet
 
     def reSendDataPacket(self, ackNum):
-        self.stopTimer()
+        # self.stopTimer()
         if not ackNum:
             t = 0
         else:
@@ -467,11 +476,11 @@ class MyClientTransport(StackingTransport):
         for i in range(t, self.windowSize):
             self.lowerTransport().write(
                 self.buildDataPacket(self.__resendsSeq[i], self.__resendsValue[i]).__serialize__())
-        self.startTimer()
+            # self.startTimer()
 
     def reSendClosePacket(self):
         self.lowerTransport().write(self.buildClosePacket(self.__initPacketSN).__serialize__())
-        self.startTimer(1)
+        # self.startTimer(1)
 
     def buildClosePacket(self, seqNum):
         packet = MyMessage()
@@ -490,7 +499,8 @@ class MyClientTransport(StackingTransport):
 class MyClientProtocol(StackingProtocolMixin, Protocol):
     __clientInitialSN = random.randint(0, 1000)
 
-    def __init__(self):
+    def __init__(self, factory):
+        self.__factory = factory
         self.__storage = MessageStorage()
         self.__buffer = ""
         self.__dataBuf = ""
@@ -507,7 +517,8 @@ class MyClientProtocol(StackingProtocolMixin, Protocol):
         self.sm.addState(state.SNN_SENT, (signal.ACK_RECEIVED, state.ESTABLISHED))
         self.sm.addState(state.ESTABLISHED, (signal.CLOSE, state.CLOSEREQ), onEnter=self.onEstablished)
         self.sm.addState(state.CLOSEREQ, (signal.CLOSE_ACK, state.CLOSED))
-        self.sm.addState(state.CLOSED, onEnter=self.onClose)
+        self.sm.addState(state.CLOSED, (signal.SYN_SEND, state.SNN_SENT), onEnter=self.onClose)
+        self.sm.start(state.CLOSED)
 
     def onEstablished(self, signal, data):
         print '[ESTABLISHED]'
@@ -517,30 +528,32 @@ class MyClientProtocol(StackingProtocolMixin, Protocol):
 
     def onClose(self, signal, data):
         print '[CLOSED]'
+        del self.__timer
         self.transport.loseConnection()
         # self.higherTransport.loseConnection()
 
     def startTimer(self):
-        self.__timer = threading.Timer(3, self.resendHS, self.sm.currentState())
+        self.__timer = threading.Timer(3, self.resendHS)
         self.__timer.start()
 
     def stopTimer(self):
-        self.__timer and self.__timer.cancel()
+        self.__timer.cancel()
 
-    def resendHS(self, cState):
-        if cState == state.SNN_SENT:
+    def resendHS(self):
+        if self.sm.currentState() == state.SNN_SENT:
+            print "resemd"
             self.sendFHSPacket()
 
     def connectionMade(self):
         self.sendFHSPacket()
+        self.sm.signal(signal.SYN_SEND, "")
 
-    def connectionLost(self, reason):
+    def connectionLost(self, reason=connectionDone):
         if reason.getErrorMessage() == "Connection was closed cleanly.":
             self.higherProtocol().connectionLost(reason)
 
     def sendFHSPacket(self):
         self.transport.write(self.buildFHSPacket().__serialize__())
-        not self.sm.started() and self.sm.start(state.SNN_SENT)
         self.startTimer()
 
     def buildFHSPacket(self):
@@ -560,7 +573,7 @@ class MyClientProtocol(StackingProtocolMixin, Protocol):
             self.__storage.update(self.__buffer[:byte])
             self.__buffer = self.__buffer[byte:]
         for msg in self.__storage.iterateMessages():
-            if hasattr(self, 'serverPubKey'):
+            if self.sm.currentState() != state.SNN_SENT:  # hasattr(self, 'clientPubKey'):
                 if not self.checkSign(msg):
                     self.authenticationFail()
                     return
@@ -570,12 +583,18 @@ class MyClientProtocol(StackingProtocolMixin, Protocol):
             elif self.sm.currentState() == state.SNN_SENT:
                 if not self.processHSSecond(msg):
                     return
+                self.sm.signal(signal.ACK_RECEIVED, msg)
             elif self.sm.currentState() == state.CLOSEREQ:
+                self.higherTransport.stopTimer()
                 self.sm.signal(signal.CLOSE_ACK, "")
             else:
+                if type(msg.Cert) == "list":
+                    if not self.processHSSecond(msg):
+                        return
                 if msg.Data:
                     self.__dataBuf += msg.Data
                 if msg.PushFlag:
+                    self.higherTransport.stopTimer()
                     self.higherProtocol() and self.higherProtocol().dataReceived(self.__dataBuf)
                     self.initialize()
                 else:
@@ -587,7 +606,6 @@ class MyClientProtocol(StackingProtocolMixin, Protocol):
             return False
         msgToSend = self.sendTHSPacket(msg)
         self.transport.write(msgToSend.__serialize__())  # try to transport my msg
-        self.sm.signal(signal.ACK_RECEIVED, msg)
         print '[CHECK] client shakehand end'
         return True
 
@@ -621,7 +639,7 @@ class MyClientProtocol(StackingProtocolMixin, Protocol):
             self.log(errType.HANDSHAKE, "checkCerts false")
             return False
         # 5.public key check the signature of nonce1
-        checkSignature = checkSign(self.serverPubKey, str(clientNonce + 1), msg.Cert[1])
+        checkSignature = str(hex(int(clientNonce, 16) + 1)) == msg.Cert[1]
         if not checkSignature:
             self.log(errType.HANDSHAKE, "wrong nonce1")
             return False
@@ -629,7 +647,7 @@ class MyClientProtocol(StackingProtocolMixin, Protocol):
 
     def sendTHSPacket(self, msg):
         msgToSend = MyMessage()
-        msgToSend.Cert = [buildSign(str(int(msg.Cert[0]) + 1))]
+        msgToSend.Cert = [str(hex(int(msg.Cert[0], 16) + 1))]
         msgToSend.SeqNum = self.__clientInitialSN + 1
         # msgToSend.SeqNumNotiFlag = True
         msgToSend.SessionID = DEFAULT_CLIENT_SESSION
@@ -655,10 +673,12 @@ class MyClientProtocol(StackingProtocolMixin, Protocol):
 
 
 class MyClientFactory(StackingFactoryMixin, ClientFactory):
-    protocol = MyClientProtocol
+    def buildProtocol(self, addr):
+        return MyClientProtocol(self)
 
     def clientConnectionLost(self, connector, reason):
-        print('Lost connection.  Reason:', reason)
+        print('line670, Lost connection.  Reason:', reason)
+        connector.connect()
         # reactor.stop()
 
 
