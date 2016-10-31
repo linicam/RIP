@@ -6,4 +6,4 @@ So, score 50% at most, because I realized it just now and no enough time to modi
 
 Attention: I've write one line hard code about importing the root cert, may need to be modified for tests.
 
-I tested in my computer and the result is that the server passes [1100, 1200, 1201], the client passes [1200, 1201]
+I tested in my computer and the result is that the server passes [1100, 1200, 1201], the client passes [1200, 1201], and then the SeqNum of the packet received mixed with the AckNum.
