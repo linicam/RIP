@@ -5,3 +5,5 @@ This protocol implemented handshake and one-direction data flow from client to s
 So, score 50% at most, because I realized it just now and no enough time to modify the code.
 
 Attention: I've write one line hard code about importing the root cert, may need to be modified for tests.
+
+I tested in my computer and the result is that the server passes [1100, 1200, 1201], the client passes [1200, 1201]
