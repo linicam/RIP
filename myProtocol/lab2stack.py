@@ -39,8 +39,7 @@ DEFAULT_SEGMENT_SIZE = 4096
 
 # !IMPORTANT
 # HARD CODE HERE
-with open("/home/linicam/network/en600424lab2/myProtocol/keys/20164_signed.cert") as f:
-    rootCertData = f.read()
+rootCertData = CertFactory.getRootCert()
 rootCert = X509Certificate.loadPEM(rootCertData)
 priKey = RSA.importKey(CertFactory.getPrivateKeyForAddr())
 

@@ -13,3 +13,7 @@ def getCertsForAddr(addr=None):
     with open(addr[1]) as f:
         chain.append(f.read())
     return chain
+
+def getRootCert(addr="/home/linicam/network/en600424lab2/myProtocol/keys/20164_signed.cert"):
+    with open(addr) as f:
+        return f.read()
