@@ -340,12 +340,12 @@ class MyServerProtocol(StackingProtocolMixin, Protocol):
         msgToSend.AckFlag = True
         msgToSend.WindowSize = self.windowSize
         msgToSend.MaxSegSize = self.segSize
-        msgToSend.Cert = [self.serverNonce, str(hex(int(msg.Cert[0], 16) + 1)), self.myCertData, self.CACertData]
+        msgToSend.Cert = [self.serverNonce, intToNonce(int(msg.Cert[0], 16) + 1), self.myCertData, self.CACertData]
         msgToSend.Signature = buildSign(msgToSend.__serialize__())
         return msgToSend
 
     def checkTHSPacket(self, msg):
-        if not str(hex(int(self.serverNonce, 16) + 1)) == msg.Cert[0]:
+        if not intToNonce(int(self.serverNonce, 16) + 1) == msg.Cert[0]:
             self.log(errType.HANDSHAKE, "wrong signature")
             return False
         return True
@@ -662,7 +662,7 @@ class MyClientProtocol(StackingProtocolMixin, Protocol):
             self.log(errType.HANDSHAKE, "checkCerts false")
             return False
         # 5.public key check the signature of nonce1
-        checkSignature = str(hex(int(clientNonce, 16) + 1)) == msg.Cert[1]
+        checkSignature = intToNonce(int(clientNonce, 16) + 1) == msg.Cert[1]
         if not checkSignature:
             self.log(errType.HANDSHAKE, "wrong nonce1")
             return False
@@ -670,7 +670,7 @@ class MyClientProtocol(StackingProtocolMixin, Protocol):
 
     def sendTHSPacket(self, msg):
         msgToSend = MyMessage()
-        msgToSend.Cert = [str(hex(int(msg.Cert[0], 16) + 1))]
+        msgToSend.Cert = [intToNonce(int(msg.Cert[0], 16) + 1)]
         msgToSend.SeqNum = self.__clientInitialSN
         # msgToSend.SeqNumNotiFlag = True
         msgToSend.SessionID = DEFAULT_CLIENT_SESSION
@@ -755,6 +755,13 @@ def checkPacketSign(key, packet):
     sign = packet.Signature
     packet.Signature = ""
     return checkSign(key, packet.__serialize__(), sign)
+
+def intToNonce(i):
+    h = hex(i)
+    h = h[2:]
+    if h[-1] == 'L':
+        h = h[:-1]
+    return h
 
 
 ConnectFactory = MyClientFactory
