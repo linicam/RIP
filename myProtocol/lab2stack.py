@@ -121,8 +121,8 @@ class RIPTransport(StackingTransport):
         self.__dataValues = []
         self.__dataSeqs = []
         while data:
-            raw.append([self.__seqNum + count * (self.segSize + 1), data[:self.segSize]])
-            data = data[self.segSize:]
+            raw.append([self.__seqNum + count * (DEFAULT_SEGMENT_SIZE + 1), data[:DEFAULT_SEGMENT_SIZE]])
+            data = data[DEFAULT_SEGMENT_SIZE:]
             count += 1
         raw.sort()
         for ele in raw:
@@ -151,7 +151,7 @@ class RIPTransport(StackingTransport):
                     start = self.__dataSeqs.index(ackNum)
                 except Exception, e:
                     print e
-        for i in range(start, start + self.windowSize):
+        for i in range(start, start + DEFAULT_WINDOW_SIZE):
             if i < len(self.__dataSeqs):
                 # if i == len(self.__dataSeqs) - 1:
                 # pushFlag = True
@@ -160,7 +160,7 @@ class RIPTransport(StackingTransport):
                 self.__resendsValue.append(self.__dataValues[i])
                 self.lowerTransport().write(packet.__serialize__())
         self.__protocol.sm.currentState() != state.CLOSED and self.startTimer()
-        self.__lastAckNum = start + self.windowSize < len(self.__dataSeqs) and self.__dataSeqs[start + self.windowSize]
+        self.__lastAckNum = start + DEFAULT_WINDOW_SIZE < len(self.__dataSeqs) and self.__dataSeqs[start + DEFAULT_WINDOW_SIZE]
 
     def startTimer(self, state=0):
         # print "start timer"
@@ -177,8 +177,6 @@ class RIPTransport(StackingTransport):
     def buildDataPacket(self, seq, data, push=False):
         packet = MyMessage()
         packet.SeqNum = seq
-        packet.WindowSize = self.windowSize
-        packet.MaxSegSize = self.segSize
         packet.Data = data
         # packet.PushFlag = push
         packet.Signature = buildSign(packet.__serialize__())
@@ -189,7 +187,7 @@ class RIPTransport(StackingTransport):
             t = 0
         else:
             t = self.__resendsSeq.index(ackNum)
-        for i in range(t, self.windowSize):
+        for i in range(t, DEFAULT_WINDOW_SIZE):
             self.lowerTransport().write(
                 self.buildDataPacket(self.__resendsSeq[i], self.__resendsValue[i]).__serialize__())
             # self.startTimer()
@@ -204,14 +202,9 @@ class RIPTransport(StackingTransport):
         packet = MyMessage()
         packet.SeqNum = self.__seqNum
         packet.CloseFlag = True
-        packet.WindowSize = self.windowSize
-        packet.MaxSegSize = self.segSize
         packet.Signature = buildSign(packet.__serialize__())
         return packet
 
-    def setSize(self, windowSize, segSize):
-        self.windowSize = windowSize
-        self.segSize = segSize
 
 
 class MyServerProtocol(StackingProtocolMixin, Protocol):
@@ -235,7 +228,7 @@ class MyServerProtocol(StackingProtocolMixin, Protocol):
         self.__timer = threading.Timer(120, self.reSendLastPacket)
         self.__dataPacketSeq = []  # store all the packet SeqNum received, used for check
         self.__ackNum = 0  #
-        self.__nextSeqNum = self.__initialSN  # next packet's sequence number
+        # self.__nextSeqNum = self.__initialSN  # next packet's sequence number
         # self.__buffer = ""
         # self.__dataBuf = ""
 
@@ -267,7 +260,6 @@ class MyServerProtocol(StackingProtocolMixin, Protocol):
     def onEstablished(self, signal, data):
         print '[ESTABLISHED]'
         self.higherTransport = RIPTransport(self.transport, self.__nextSeqNum, self)
-        self.higherTransport.setSize(data.WindowSize, data.MaxSegSize)
         self.makeHigherConnection(self.higherTransport)
 
     def connectionMade(self):
@@ -280,13 +272,13 @@ class MyServerProtocol(StackingProtocolMixin, Protocol):
         # print 'first sent'
         msgToSend = self.buildFHSPacket()
         self.transport.write(msgToSend.__serialize__())
-        self.__nextSeqNum += (len(msgToSend.Data) or 1)
+        self.__lastPacket = msgToSend
         self.sm.signal(signal.SYN_SEND, "")
         self.startTimer()
 
     def buildFHSPacket(self):
         initialMsg = MyMessage()
-        initialMsg.SeqNum = self.__nextSeqNum
+        initialMsg.SeqNum = self.__initialSN
         initialMsg.SeqNumNotiFlag = True
         initialMsg.SessionID = DEFAULT_CLIENT_SESSION
         initialMsg.Cert = [str(clientNonce), self.myCertData, self.CACertData]
@@ -334,6 +326,8 @@ class MyServerProtocol(StackingProtocolMixin, Protocol):
                 elif msg.ResetFlag:
                     # all reset packets include SNN
                     # print "[SERVER RESET]"
+                    if not msg.SeqNum == self.__peerISN - 1:
+                        continue
                     self.initialize()
                     if self.__isClient:  # client
                         self.sendFHSPacket()
@@ -343,6 +337,8 @@ class MyServerProtocol(StackingProtocolMixin, Protocol):
                             return
                         self.sm.signal(signal.SYN_RECEIVED, msg)
                 return
+            if msg.SeqNum != self.__ackNum:
+                continue
             if self.sm.currentState() == state.LISTENING:  # handshake phase 1
                 if not self.processHSFirst(msg):
                     self.authenticationFail()
@@ -373,46 +369,25 @@ class MyServerProtocol(StackingProtocolMixin, Protocol):
                     # print "[CHECK] data received"
                     self.higherTransport.sendMsg(msg.AckNum)
                 else:
-                    if msg.SeqNum < self.__ackNum:
-                        # packet has received
-                        # print "[PASS]"
-                        try:
-                            self.__dataPacketSeq.index(msg.SeqNum)
-                        except Exception, e:
-                            self.log(errType.TRANSMISSION, "packe not in the list")
-                            # self.higherTransport.write(self.buildAckPacket(msg, True))
-                        continue
-                    # if not self.checkDataPacket(msg):
-                    #     continue
-                    if msg.SeqNum > self.__ackNum:
-                        # data packet in the middle lost
-                        self.log(errType.TRANSMISSION, "packet lost")
-                        # self.higherTransport.write(self.buildAckPacket(msg, True))
-                        continue
-                    else:
-                        self.processData(msg)
+                    self.processData(msg)
 
     def processHSFirst(self, msg):  # server
         if not self.checkHSPacket(msg):
             return False
-        self.setSize(msg.WindowSize, msg.MaxSegSize)
-        self.__peerISN = msg.SeqNum + (len(msg.Data) or 1)
+        self.__peerISN = msg.SeqNum + 1
         msgToSend = self.sendSHSPacket(msg)
         self.transport.write(msgToSend.__serialize__())
-        self.__nextSeqNum += (len(msgToSend.Data) or 1)
         self.__lastPacket = msgToSend
         # print '[CHECK] phase 1 end'
         return True
 
     def sendSHSPacket(self, msg):  # server
         msgToSend = MyMessage()
-        msgToSend.SeqNum = self.__serverInitialSN
+        msgToSend.SeqNum = self.__initialSN
         msgToSend.SessionID = msg.SessionID[len(msg.Cert[0]):] + msg.SessionID[:len(msg.Cert[0])]
-        self.__ackNum = msg.SeqNum + (len(msg.Data) or 1)
+        self.__ackNum = msg.SeqNum + 1
         msgToSend.AckNum = self.__ackNum
         msgToSend.AckFlag = True
-        msgToSend.WindowSize = self.windowSize
-        msgToSend.MaxSegSize = self.segSize
         msgToSend.Cert = [self.serverNonce, intToNonce(int(msg.Cert[0], 16) + 1), self.myCertData, self.CACertData]
         msgToSend.Signature = buildSign(msgToSend.__serialize__())
         return msgToSend
@@ -420,8 +395,7 @@ class MyServerProtocol(StackingProtocolMixin, Protocol):
     def processHSSecond(self, msg):  # client
         if not self.checkHSPacket(msg):
             return False
-        self.setSize(msg.WindowSize, msg.MaxSegSize)
-        self.__peerISN = msg.SeqNum + (len(msg.Data) or 1)
+        self.__peerISN = msg.SeqNum + 1
         msgToSend = self.sendTHSPacket(msg)
         self.transport.write(msgToSend.__serialize__())  # try to transport my msg
         self.__lastPacket = msgToSend
@@ -431,10 +405,10 @@ class MyServerProtocol(StackingProtocolMixin, Protocol):
     def sendTHSPacket(self, msg):
         msgToSend = MyMessage()
         msgToSend.Cert = [intToNonce(int(msg.Cert[0], 16) + 1)]
-        msgToSend.SeqNum = self.__clientInitialSN
+        msgToSend.SeqNum = self.__initialSN + 1
         # msgToSend.SeqNumNotiFlag = True
         msgToSend.SessionID = DEFAULT_CLIENT_SESSION
-        self.__ackNum = msg.SeqNum + (len(msg.Data) or 1)
+        self.__ackNum = msg.SeqNum + 1
         msgToSend.AckNum = self.__ackNum
         msgToSend.AckFlag = True
         msgToSend.Signature = buildSign(msgToSend.__serialize__())
@@ -474,6 +448,7 @@ class MyServerProtocol(StackingProtocolMixin, Protocol):
         # else:
         #     self.clientPubKey = RSA.importKey(pubKeyBlock)
         self.peerPubKey = RSA.importKey(peerPubKeyBlock)
+        # check Ack
         # 0. Check signature
         if not self.checkSign(msg):
             return False
@@ -525,14 +500,12 @@ class MyServerProtocol(StackingProtocolMixin, Protocol):
         else:
             msgToSend.AckNum = msg.SeqNum + len(msg.Data) + 1
         msgToSend.AckFlag = True
-        msgToSend.WindowSize = self.windowSize
-        msgToSend.MaxSegSize = self.segSize
         msgToSend.Signature = buildSign(msgToSend.__serialize__())
         return msgToSend
 
     def buildResetPacket(self):
         msgToSend = MyMessage()
-        msgToSend.SeqNum = self.__clientInitialSN
+        msgToSend.SeqNum = self.__initialSN
         msgToSend.SeqNumNotiFlag = True
         msgToSend.ResetFlag = True
         if self.__isClient:
@@ -549,13 +522,10 @@ class MyServerProtocol(StackingProtocolMixin, Protocol):
 
     def initialize(self):
         self.sm.signal(signal.RESET, "")
-        # once a data has all received, wait for next input of client
         self.__ackNum = 0
         self.__dataBuf = ""
-
-    def setSize(self, windowSize, segSize):
-        self.windowSize = min(windowSize, DEFAULT_WINDOW_SIZE)
-        self.segSize = min(segSize, DEFAULT_SEGMENT_SIZE)
+        self.__lastPacket = ""
+        self.__buffer = ""
 
     def checkSign(self, msg):
         checkSignature = checkPacketSign(self.clientPubKey, msg)
@@ -608,7 +578,6 @@ class MyClientProtocol(StackingProtocolMixin, Protocol):
     def onEstablished(self, signal, data):
         print '[ESTABLISHED]'
         # self.higherTransport = MyServerTransport(self.transport, self.__clientInitialSN + 1, self)
-        self.higherTransport.setSize(data.WindowSize, data.MaxSegSize)
         self.makeHigherConnection(self.higherTransport)
 
     def onClose(self, signal, data):
