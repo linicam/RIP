@@ -1,5 +1,4 @@
 import sys
-from twisted.internet.protocol import ReconnectingClientFactory
 
 from myProtocol import lab2stack
 from playground.twisted.endpoints import GateClientEndpoint
@@ -28,6 +27,9 @@ class httpClient(protocol.Protocol):
 
 
 class httpClientFactory(protocol.ClientFactory):
+    def __init__(self):
+        pass
+
     global client
 
     def buildProtocol(self, addr):

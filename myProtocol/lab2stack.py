@@ -10,6 +10,9 @@
 # If the client uses loseConnection() before data transmitted, server will immediately change to CLOSE_RECV state, and
 # send the ack of Close, otherwise when loseConnection() is called, all data must be transmitted since after received
 # ack it will start loseConnection()
+# SEQ = lastpacket(LP)'s SEQ + LP's data length
+# ACK = RP's SEQ + RP's data length
+
 
 # PROBLEMS:
 # no recovery
@@ -62,14 +65,11 @@ class MyMessage(MessageDefinition):
         ("Cert", LIST(STRING), OPTIONAL),
         ("AckFlag", BOOL1, DEFAULT_VALUE(False)),
         ("SessionID", STRING, OPTIONAL),
-        ("WindowSize", UINT1, DEFAULT_VALUE(DEFAULT_WINDOW_SIZE)),
-        ("MaxSegSize", UINT4, DEFAULT_VALUE(DEFAULT_SEGMENT_SIZE)),
         ("CloseFlag", BOOL1, DEFAULT_VALUE(False)),
         ("SeqNumNotiFlag", BOOL1, DEFAULT_VALUE(False)),
         ("ResetFlag", BOOL1, DEFAULT_VALUE(False)),
-        ("PushFlag", BOOL1, DEFAULT_VALUE(False)),
         ("Data", STRING, DEFAULT_VALUE("")),
-        ("OPTIONS", LIST(STRING), DEFAULT_VALUE([]))
+        ("OPTIONS", LIST(STRING), OPTIONAL)
     ]
 
 
@@ -103,316 +103,14 @@ class errType(object):
 
 # ----------------------------------
 # server
-class MyServerTransport(StackingTransport):
-    # def __init__(self, lowerTransport, fixedKey):
-    __data = ""
-
-    def __init__(self, lowerTransport):
-        StackingTransport.__init__(self, lowerTransport)
-        self.__timer = threading.Timer(120, self.reSendAckPacket)
-
-    def startTimer(self):
-        self.__timer = threading.Timer(120, self.reSendAckPacket)
-        self.__timer.start()
-
-    def stopTimer(self):
-        self.__timer and self.__timer.cancel()
-
-    def reSendAckPacket(self):
-        self.lowerTransport().write(self.__dataPacket)
-
-    def write(self, packet):
-        self.stopTimer()
-        if isinstance(packet, str):
-            self.__data = packet
-            return
-        else:
-            packet.Data = self.__data
-            packet.Signature = ""
-            packet.Signature = buildSign(packet.__serialize__())
-        self.lowerTransport().write(packet.__serialize__())
-        not packet.PushFlag and self.startTimer()
-        self.__dataPacket = packet.__serialize__()
-        self.__data = ""
-
-
-class MyServerProtocol(StackingProtocolMixin, Protocol):
-    __serverInitialSN = random.randint(0, pow(2, 32))
-
-    def __init__(self):
-        # self.__protocolStack = protocolStack
-        self.sm = StateMachine("ServerStateMachine")
-        self.__storage = MessageStorage()
-        self.setupServerSM()
-
-        certs = CertFactory.getCertsForAddr()
-        self.myCertData = certs[0]
-        self.CACertData = certs[1]
-
-        self.__buffer = ""  # for data received
-        self.__bufCount = 0  # for count packet until it reachs WindowSize
-        self.__dataBuf = ""  # store the data received
-        self.__lastPacket = ""  # the last sent packet used when reset flag is true
-        self.__timer = threading.Timer(120, self.reSendLastPacket)
-        self.__dataPacketSeq = []  # store all the packet SeqNum received, used for check
-
-    def setupServerSM(self):
-        self.sm.addState(state.LISTENING, (signal.SYN_RECEIVED, state.SNN_RECV), onEnter=self.onEnd)
-        self.sm.addState(state.SNN_RECV, (signal.ACK_RECEIVED, state.ESTABLISHED), (signal.RESET, state.SNN_RECV))
-        self.sm.addState(state.ESTABLISHED, (signal.CLOSE_REQ, state.CLOSERECV), (signal.RESET, state.SNN_RECV))
-        self.sm.addState(state.CLOSERECV, (signal.CLOSE, state.LISTENING))
-        # ESTABLISHED receive close packet and change to CLOSERECV, after send the ACK, change to LISTENING
-        # so from ESTABLISHED to LISTENGING only receive one packet, in CLOSERECV state won't receive packet
-        # self.sm.addState(state.CLOSED, onEnter=self.onClose)
-        self.sm.start(state.LISTENING)
-
-    def onEnd(self, signal, data):
-        # if self.__protocolStack.has_key(self.transport.getPeer()[0]):
-        #     del self.__protocolStack[self.transport.getPeer()[0]]
-        pass
-
-    # def onClose(self, signal, data):
-    #     pass
-    #     self.transport.loseConnection()
-
-    # def connectionLost(self, reason=connectionDone):
-    #     print "lost"
-    #     if reason.getErrorMessage() == connectionDone.getErrorMessage():
-    #         # self.higherTransport.loseConnection()
-    #         self.higherProtocol().connectionLost(reason)
-
-    def connectionMade(self):
-        # self.__protocolStack[self.transport.getPeer()[0]] = self
-        self.higherTransport = MyServerTransport(self.transport)
-        self.makeHigherConnection(self.higherTransport)
-
-    def startTimer(self):
-        self.__timer = threading.Timer(120, self.reSendLastPacket)
-        self.__timer.start()
-
-    def stopTimer(self):
-        self.__timer and self.__timer.cancel()
-
-    def reSendLastPacket(self):
-        # print "[RESNED]"
-        self.transport.write(self.__lastPacket)
-
-    def dataReceived(self, data):
-        self.stopTimer()
-        # print "[dataReceived]"  # my IP
-        self.__buffer += data
-        while self.__buffer:
-            msg, byte = MyMessage.Deserialize(self.__buffer)
-            self.__storage.update(self.__buffer[:byte])
-            self.__buffer = self.__buffer[byte:]
-        for msg in self.__storage.iterateMessages():
-            # after handshake phase 1, got clientPubKey, then authenticate
-            if self.sm.currentState() != state.LISTENING:
-                if not self.checkSign(msg):  # hasattr(self, 'clientPubKey'):
-                    # failed during data exchange, pass
-                    # failed during handshake, reset
-                    if self.sm.currentState() == state.SNN_RECV:
-                        self.authenticationFail()
-                    return
-                if msg.SeqNumNotiFlag:
-                    # all reset packets include SNN
-                    # print "[SERVER RESET]"
-                    self.initialize()
-                    if not self.processHSFirst(msg):
-                        return
-                    self.sm.signal(signal.RESET, msg)
-                    return
-            if self.sm.currentState() == state.LISTENING:  # handshake phase 1
-                if not self.processHSFirst(msg):
-                    return
-                self.sm.signal(signal.SYN_RECEIVED, msg)
-            elif self.sm.currentState() == state.SNN_RECV:  # handshake phase 3
-                if not self.processHSThird(msg):
-                    return
-                self.sm.signal(signal.ACK_RECEIVED, msg)
-            elif self.sm.currentState() == state.ESTABLISHED:
-                if msg.CloseFlag:
-                    print '[CLOSED]'
-                    if msg.SeqNum == self.__clientISN:
-                        self.sm.signal(signal.CLOSE_REQ, msg)
-                        self.higherTransport.write(self.buildAckPacket(msg))
-                        self.sm.signal(signal.CLOSE, msg)
-                else:
-                    # print "[CHECK] data received"
-                    if msg.SeqNum < self.__lastAckNum:
-                        # packet has received
-                        # print "[PASS]"
-                        try:
-                            self.__dataPacketSeq.index(msg.SeqNum)
-                        except Exception, e:
-                            self.log(errType.TRANSMISSION, "fake packet")
-                            self.higherTransport.write(self.buildAckPacket(msg, True))
-                        continue
-                    if not self.checkDataPacket(msg):
-                        continue
-                    if msg.SeqNum > self.__lastAckNum:
-                        # data packet in the middle lost
-                        self.log(errType.TRANSMISSION, "packet lost")
-                        self.higherTransport.write(self.buildAckPacket(msg, True))
-                    else:
-                        self.processData(msg)
-
-    def processHSFirst(self, msg):
-        if not self.checkFHSPacket(msg):
-            self.authenticationFail()
-            return False
-        self.setSize(msg.WindowSize, msg.MaxSegSize)
-        if msg.SeqNumNotiFlag:
-            self.__clientISN = msg.SeqNum + 1
-        # print '[CHECK] phase 1 end'
-        self.transport.write(self.sendSHSPacket(msg).__serialize__())
-        self.__lastPacket = self.sendSHSPacket(msg).__serialize__()
-        self.startTimer()
-        return True
-
-    def processHSThird(self, msg):
-        if not self.checkTHSPacket(msg):
-            self.authenticationFail()
-            return False
-        if msg.SeqNumNotiFlag:
-            self.__clientISN = msg.SeqNum
-        self.__lastAckNum = self.__clientISN + self.segSize + 1
-        print '[ESTABLISHED]'
-        return True
-
-    def processData(self, msg):
-        self.__dataPacketSeq.append(msg.SeqNum)
-        if self.__bufCount < self.windowSize:
-            # not all data packets received
-            self.__dataBuf += msg.Data
-            self.__bufCount += 1
-            self.__lastAckNum = msg.SeqNum + len(msg.Data) + 1
-        if self.__bufCount == self.windowSize or msg.PushFlag:
-            # have received all packets, send ack
-            self.__bufCount = 0
-            packetToSent = self.buildAckPacket(msg)
-            if msg.PushFlag:
-                self.higherProtocol() and self.higherProtocol().dataReceived(self.__dataBuf)
-                self.initialize()
-                packetToSent.PushFlag = True
-            self.higherTransport.write(packetToSent)
-
-    def initialize(self):
-        # once a data has all received, wait for next input of client
-        self.__lastAckNum = self.__clientISN + self.segSize + 1
-        self.__dataBuf = ""
-
-    def setSize(self, windowSize, segSize):
-        self.windowSize = min(windowSize, DEFAULT_WINDOW_SIZE)
-        self.segSize = min(segSize, DEFAULT_SEGMENT_SIZE)
-
-    def checkFHSPacket(self, msg):
-        clientCert1 = X509Certificate.loadPEM(msg.Cert[1])  # a.b.c.d
-        clientCert2 = X509Certificate.loadPEM(msg.Cert[2])  # a.b.c
-        # get client public key
-        clientPubKeyBlock = clientCert2.getPublicKeyBlob()
-        self.clientPubKey = RSA.importKey(clientPubKeyBlock)
-        # 0. Check signature
-        if not self.checkSign(msg):
-            return False
-        # 1.server do check IP
-        if clientCert1.getSubject()["commonName"] != self.transport.getPeer()[0]:
-            self.log(errType.HANDSHAKE, "IP false")
-            return False
-        # 2, 3, 4: checkCerts
-        res = checkCerts(self, clientCert1, clientCert2)
-        if not res:
-            self.log(errType.HANDSHAKE, "checkCerts false")
-            return False
-        # get server's nonce
-        if msg.SessionID[:len(msg.Cert[0])] != msg.Cert[0]:
-            self.log(errType.HANDSHAKE, "wrong client nonce")
-            return False
-        self.serverNonce = msg.SessionID[len(msg.Cert[0]):]
-        return True
-
-    def sendSHSPacket(self, msg):
-        msgToSend = MyMessage()
-        msgToSend.SeqNum = self.__serverInitialSN
-        msgToSend.SessionID = msg.SessionID[len(msg.Cert[0]):] + msg.SessionID[:len(msg.Cert[0])]
-        msgToSend.AckNum = msg.SeqNum + 1
-        msgToSend.AckFlag = True
-        msgToSend.WindowSize = self.windowSize
-        msgToSend.MaxSegSize = self.segSize
-        msgToSend.Cert = [self.serverNonce, intToNonce(int(msg.Cert[0], 16) + 1), self.myCertData, self.CACertData]
-        msgToSend.Signature = buildSign(msgToSend.__serialize__())
-        return msgToSend
-
-    def checkTHSPacket(self, msg):
-        if not intToNonce(int(self.serverNonce, 16) + 1) == msg.Cert[0]:
-            self.log(errType.HANDSHAKE, "wrong signature")
-            return False
-        return True
-
-    def checkDataPacket(self, msg):
-        if msg.WindowSize != self.windowSize:
-            self.log(errType.TRANSMISSION, "window size error")
-            return False
-        if msg.MaxSegSize != self.segSize:
-            self.log(errType.TRANSMISSION, "segment size error")
-            return False
-        return True
-
-    def buildAckPacket(self, msg, resetAck=False):
-        msgToSend = MyMessage()
-        self.__serverInitialSN += 1
-        msgToSend.SeqNum = self.__serverInitialSN
-        if resetAck:
-            msgToSend.AckNum = self.__lastAckNum
-        else:
-            msgToSend.AckNum = msg.SeqNum + len(msg.Data) + 1
-        msgToSend.AckFlag = True
-        msgToSend.WindowSize = self.windowSize
-        msgToSend.MaxSegSize = self.segSize
-        msgToSend.Signature = buildSign(msgToSend.__serialize__())
-        return msgToSend
-
-    def buildResetPacket(self):
-        msgToSend = MyMessage()
-        msgToSend.SeqNum = self.__serverInitialSN
-        msgToSend.ResetFlag = True
-        msgToSend.Cert = [self.myCertData, self.CACertData]
-        msgToSend.Signature = buildSign(msgToSend.__serialize__())
-        return msgToSend
-
-    def checkSign(self, msg):
-        checkSignature = checkPacketSign(self.clientPubKey, msg)
-        if not checkSignature:
-            self.log(errType.HANDSHAKE, "signature false")
-        return checkSignature
-
-    def authenticationFail(self):
-        self.higherTransport.write(self.buildResetPacket())
-
-    def log(self, type, msg):
-        print '[' + type + ']: ' + msg
-
-
-class MyServerFactory(StackingFactoryMixin, ServerFactory):
-    # protocolStack = {}
-    # FixedKey = "PASSWORD"
-    def buildProtocol(self, addr):
-        # print "server build"
-        # print self.protocolStack
-        return MyServerProtocol()
-
-
-# ------------------------------------------------------------------
-# below are client
-
-
-class MyClientTransport(StackingTransport):
+class RIPTransport(StackingTransport):
     __resendsSeq = []  # store currently sent packets' SeqNum
     __resendsValue = []  # store currently sent packets' data
     __lastAckNum = 0  # store the next AckNum, so if the received AckNum smaller than it, some packets should be resent
 
     def __init__(self, lowerTransport, initSeqNum, protocol):
         self.__initPacketSN = initSeqNum
+        self.__seqNum = initSeqNum
         self.__protocol = protocol
         self.__timer = threading.Timer(120, self.reSendDataPacket, 0)
         StackingTransport.__init__(self, lowerTransport)
@@ -423,7 +121,7 @@ class MyClientTransport(StackingTransport):
         self.__dataValues = []
         self.__dataSeqs = []
         while data:
-            raw.append([self.__initPacketSN + count * (self.segSize + 1), data[:self.segSize]])
+            raw.append([self.__seqNum + count * (self.segSize + 1), data[:self.segSize]])
             data = data[self.segSize:]
             count += 1
         raw.sort()
@@ -433,14 +131,14 @@ class MyClientTransport(StackingTransport):
         self.sendMsg(0)
 
     def loseConnection(self):
-        self.lowerTransport().write(self.buildClosePacket(self.__initPacketSN).__serialize__())
+        self.lowerTransport().write(self.buildClosePacket().__serialize__())
         self.__protocol.setSMCloseReq()
         self.startTimer(1)
 
     def sendMsg(self, ackNum):
         self.__resendsSeq = []
         self.__resendsValue = []
-        pushFlag = False
+        # pushFlag = False
         start = 0
         if ackNum:
             if ackNum < self.__lastAckNum:
@@ -455,9 +153,9 @@ class MyClientTransport(StackingTransport):
                     print e
         for i in range(start, start + self.windowSize):
             if i < len(self.__dataSeqs):
-                if i == len(self.__dataSeqs) - 1:
-                    pushFlag = True
-                packet = self.buildDataPacket(self.__dataSeqs[i], self.__dataValues[i], pushFlag)
+                # if i == len(self.__dataSeqs) - 1:
+                # pushFlag = True
+                packet = self.buildDataPacket(self.__dataSeqs[i], self.__dataValues[i])
                 self.__resendsSeq.append(self.__dataSeqs[i])
                 self.__resendsValue.append(self.__dataValues[i])
                 self.lowerTransport().write(packet.__serialize__())
@@ -482,7 +180,7 @@ class MyClientTransport(StackingTransport):
         packet.WindowSize = self.windowSize
         packet.MaxSegSize = self.segSize
         packet.Data = data
-        packet.PushFlag = push
+        # packet.PushFlag = push
         packet.Signature = buildSign(packet.__serialize__())
         return packet
 
@@ -495,16 +193,16 @@ class MyClientTransport(StackingTransport):
             self.lowerTransport().write(
                 self.buildDataPacket(self.__resendsSeq[i], self.__resendsValue[i]).__serialize__())
             # self.startTimer()
-        # print "resenddata"
+            # print "resenddata"
 
     def reSendClosePacket(self):
         self.lowerTransport().write(self.buildClosePacket(self.__initPacketSN).__serialize__())
         # self.startTimer(1)
         # print "resendclose"
 
-    def buildClosePacket(self, seqNum):
+    def buildClosePacket(self):
         packet = MyMessage()
-        packet.SeqNum = seqNum
+        packet.SeqNum = self.__seqNum
         packet.CloseFlag = True
         packet.WindowSize = self.windowSize
         packet.MaxSegSize = self.segSize
@@ -514,6 +212,372 @@ class MyClientTransport(StackingTransport):
     def setSize(self, windowSize, segSize):
         self.windowSize = windowSize
         self.segSize = segSize
+
+
+class MyServerProtocol(StackingProtocolMixin, Protocol):
+    __initialSN = random.randint(0, pow(2, 32))
+
+    def __init__(self, isClient=False):
+        # self.__protocolStack = protocolStack
+        self.__isClient = isClient
+        self.sm = StateMachine("StateMachine")
+        self.__storage = MessageStorage()
+        self.setupServerSM()
+
+        certs = CertFactory.getCertsForAddr()
+        self.myCertData = certs[0]
+        self.CACertData = certs[1]
+
+        self.__buffer = ""  # for data received
+        # self.__bufCount = 0  # for count packet until it reachs WindowSize
+        self.__dataBuf = ""  # store the data received
+        self.__lastPacket = ""  # the last sent packet used when reset flag is true
+        self.__timer = threading.Timer(120, self.reSendLastPacket)
+        self.__dataPacketSeq = []  # store all the packet SeqNum received, used for check
+        self.__ackNum = 0  #
+        self.__nextSeqNum = self.__initialSN  # next packet's sequence number
+        # self.__buffer = ""
+        # self.__dataBuf = ""
+
+        # self.__timer = threading.Timer(120, self.resendHS, self.sm.currentState())
+
+    def setupServerSM(self):
+        self.sm.addState(state.LISTENING, (signal.SYN_RECEIVED, state.SNN_RECV), (signal.SYN_SEND, state.SNN_SENT),
+                         onEnter=self.onClose)
+        self.sm.addState(state.SNN_SENT, (signal.ACK_RECEIVED, state.ESTABLISHED), (signal.RESET, state.LISTENING))
+        self.sm.addState(state.SNN_RECV, (signal.ACK_RECEIVED, state.ESTABLISHED), (signal.RESET, state.LISTENING))
+        self.sm.addState(state.ESTABLISHED, (signal.CLOSE_REQ, state.CLOSERECV),
+                         (signal.CLOSE, state.CLOSEREQ), (signal.RESET, state.SNN_RECV), onEnter=self.onEstablished)
+
+        self.sm.addState(state.CLOSEREQ, (signal.CLOSE_ACK, state.LISTENING), (signal.RESET, state.LISTENING))
+        self.sm.addState(state.CLOSERECV, (signal.CLOSE, state.LISTENING))
+        # ESTABLISHED receive close packet and change to CLOSERECV, after send the ACK, change to LISTENING
+        # so from ESTABLISHED to LISTENGING only receive one packet, in CLOSERECV state won't receive packet
+        # self.sm.addState(state.CLOSED, onEnter=self.onClose)
+        self.sm.start(state.LISTENING)
+
+        # self.sm.addState(state.ESTABLISHED, (signal.CLOSE, state.CLOSEREQ), (signal.RESET, state.SNN_SENT), onEnter=self.onEstablished)
+
+    def onClose(self, signal, data):
+        if self.__isClient:
+            print '[CLOSED]'
+            del self.__timer
+            self.transport.loseConnection()
+
+    def onEstablished(self, signal, data):
+        print '[ESTABLISHED]'
+        self.higherTransport = RIPTransport(self.transport, self.__nextSeqNum, self)
+        self.higherTransport.setSize(data.WindowSize, data.MaxSegSize)
+        self.makeHigherConnection(self.higherTransport)
+
+    def connectionMade(self):
+        self.sendFHSPacket()
+        # self.__protocolStack[self.transport.getPeer()[0]] = self
+        # self.higherTransport = MyServerTransport(self.transport)
+        # self.makeHigherConnection(self.higherTransport)
+
+    def sendFHSPacket(self):
+        # print 'first sent'
+        msgToSend = self.buildFHSPacket()
+        self.transport.write(msgToSend.__serialize__())
+        self.__nextSeqNum += (len(msgToSend.Data) or 1)
+        self.sm.signal(signal.SYN_SEND, "")
+        self.startTimer()
+
+    def buildFHSPacket(self):
+        initialMsg = MyMessage()
+        initialMsg.SeqNum = self.__nextSeqNum
+        initialMsg.SeqNumNotiFlag = True
+        initialMsg.SessionID = DEFAULT_CLIENT_SESSION
+        initialMsg.Cert = [str(clientNonce), self.myCertData, self.CACertData]
+        initialMsg.Signature = buildSign(initialMsg.__serialize__())
+        return initialMsg
+
+    def connectionLost(self, reason=connectionDone):
+        if reason.getErrorMessage() == connectionDone.getErrorMessage():
+            self.higherProtocol().connectionLost(reason)
+
+    def startTimer(self):
+        self.__timer = threading.Timer(120, self.reSendLastPacket)
+        # self.__timer = threading.Timer(120, self.resendHS)
+        # self.__timer.start()
+        self.__timer.start()
+
+    def stopTimer(self):
+        self.__timer and self.__timer.cancel()
+
+    def resendHS(self):
+        if self.sm.currentState() == state.SNN_SENT:
+            print "[RESEND HANDSHAKE]"
+            self.sendFHSPacket()
+
+    def reSendLastPacket(self):
+        self.transport.write(self.__lastPacket)
+
+    def dataReceived(self, data):
+        self.stopTimer()
+        # print "[dataReceived]"  # my IP
+        self.__buffer += data
+        while self.__buffer:
+            msg, byte = MyMessage.Deserialize(self.__buffer)
+            self.__storage.update(self.__buffer[:byte])
+            self.__buffer = self.__buffer[byte:]
+        for msg in self.__storage.iterateMessages():
+            # after handshake phase 1, got clientPubKey, then authenticate
+            if self.sm.currentState() != state.LISTENING or self.sm.currentState() != state.SNN_SENT:
+                if not self.checkSign(msg):  # hasattr(self, 'clientPubKey'):
+                    # failed during data exchange, pass
+                    # failed during handshake, reset
+                    # if self.sm.currentState() == state.SNN_RECV:
+                    if self.sm.currentState() != state.ESTABLISHED:
+                        self.authenticationFail()
+                elif msg.ResetFlag:
+                    # all reset packets include SNN
+                    # print "[SERVER RESET]"
+                    self.initialize()
+                    if self.__isClient:  # client
+                        self.sendFHSPacket()
+                    else:
+                        if not self.processHSFirst(msg):  # server
+                            self.authenticationFail()
+                            return
+                        self.sm.signal(signal.SYN_RECEIVED, msg)
+                return
+            if self.sm.currentState() == state.LISTENING:  # handshake phase 1
+                if not self.processHSFirst(msg):
+                    self.authenticationFail()
+                    return
+                self.sm.signal(signal.SYN_RECEIVED, msg)
+            elif self.sm.currentState() == state.SNN_SENT:  # handshake phase 2
+                if not self.processHSSecond(msg):
+                    self.authenticationFail()
+                    return
+                self.sm.signal(signal.ACK_RECEIVED, msg)
+            elif self.sm.currentState() == state.SNN_RECV:  # handshake phase 3
+                if not self.processHSThird(msg):
+                    self.authenticationFail()
+                    return
+                self.sm.signal(signal.ACK_RECEIVED, msg)
+            elif self.sm.currentState() == state.CLOSEREQ:
+                # self.higherTransport.stopTimer()
+                self.sm.signal(signal.CLOSE_ACK, "")
+            elif self.sm.currentState() == state.ESTABLISHED:
+                # self.higherTransport.stopTimer()
+                if msg.CloseFlag:
+                    print '[CLOSED]'
+                    if msg.SeqNum == self.__peerISN:
+                        self.sm.signal(signal.CLOSE_REQ, msg)
+                        self.higherTransport.write(self.buildAckPacket(msg))
+                        self.sm.signal(signal.CLOSE, msg)
+                elif self.__isClient:
+                    # print "[CHECK] data received"
+                    self.higherTransport.sendMsg(msg.AckNum)
+                else:
+                    if msg.SeqNum < self.__ackNum:
+                        # packet has received
+                        # print "[PASS]"
+                        try:
+                            self.__dataPacketSeq.index(msg.SeqNum)
+                        except Exception, e:
+                            self.log(errType.TRANSMISSION, "packe not in the list")
+                            # self.higherTransport.write(self.buildAckPacket(msg, True))
+                        continue
+                    # if not self.checkDataPacket(msg):
+                    #     continue
+                    if msg.SeqNum > self.__ackNum:
+                        # data packet in the middle lost
+                        self.log(errType.TRANSMISSION, "packet lost")
+                        # self.higherTransport.write(self.buildAckPacket(msg, True))
+                        continue
+                    else:
+                        self.processData(msg)
+
+    def processHSFirst(self, msg):  # server
+        if not self.checkHSPacket(msg):
+            return False
+        self.setSize(msg.WindowSize, msg.MaxSegSize)
+        self.__peerISN = msg.SeqNum + (len(msg.Data) or 1)
+        msgToSend = self.sendSHSPacket(msg)
+        self.transport.write(msgToSend.__serialize__())
+        self.__nextSeqNum += (len(msgToSend.Data) or 1)
+        self.__lastPacket = msgToSend
+        # print '[CHECK] phase 1 end'
+        return True
+
+    def sendSHSPacket(self, msg):  # server
+        msgToSend = MyMessage()
+        msgToSend.SeqNum = self.__serverInitialSN
+        msgToSend.SessionID = msg.SessionID[len(msg.Cert[0]):] + msg.SessionID[:len(msg.Cert[0])]
+        self.__ackNum = msg.SeqNum + (len(msg.Data) or 1)
+        msgToSend.AckNum = self.__ackNum
+        msgToSend.AckFlag = True
+        msgToSend.WindowSize = self.windowSize
+        msgToSend.MaxSegSize = self.segSize
+        msgToSend.Cert = [self.serverNonce, intToNonce(int(msg.Cert[0], 16) + 1), self.myCertData, self.CACertData]
+        msgToSend.Signature = buildSign(msgToSend.__serialize__())
+        return msgToSend
+
+    def processHSSecond(self, msg):  # client
+        if not self.checkHSPacket(msg):
+            return False
+        self.setSize(msg.WindowSize, msg.MaxSegSize)
+        self.__peerISN = msg.SeqNum + (len(msg.Data) or 1)
+        msgToSend = self.sendTHSPacket(msg)
+        self.transport.write(msgToSend.__serialize__())  # try to transport my msg
+        self.__lastPacket = msgToSend
+        # print '[CHECK] phase 2 end'
+        return True
+
+    def sendTHSPacket(self, msg):
+        msgToSend = MyMessage()
+        msgToSend.Cert = [intToNonce(int(msg.Cert[0], 16) + 1)]
+        msgToSend.SeqNum = self.__clientInitialSN
+        # msgToSend.SeqNumNotiFlag = True
+        msgToSend.SessionID = DEFAULT_CLIENT_SESSION
+        self.__ackNum = msg.SeqNum + (len(msg.Data) or 1)
+        msgToSend.AckNum = self.__ackNum
+        msgToSend.AckFlag = True
+        msgToSend.Signature = buildSign(msgToSend.__serialize__())
+        return msgToSend
+
+    def processHSThird(self, msg):
+        if not self.checkTHSPacket(msg):
+            return False
+        # no need to add ACK or nextSEQ
+        # self.__ackNum = msg.SeqNum + (len(msg.Data) or 1)
+        print '[ESTABLISHED]'
+        return True
+
+    def processData(self, msg):
+        # self.__dataPacketSeq.append(msg.SeqNum)
+        # if self.__bufCount < self.windowSize:
+        #     # not all data packets received
+        #     self.__dataBuf += msg.Data
+        #     self.__bufCount += 1
+        #     self.__ackNum = msg.SeqNum + len(msg.Data) + 1
+        # if self.__bufCount == self.windowSize or msg.PushFlag:
+        # have received all packets, send ack
+        # self.__bufCount = 0
+        packetToSent = self.buildAckPacket(msg)
+        # if msg.PushFlag:
+        self.higherProtocol() and self.higherProtocol().dataReceived(self.__dataBuf)
+        self.initialize()
+        # packetToSent.PushFlag = True
+        self.higherTransport.write(packetToSent)
+
+    def checkHSPacket(self, msg):
+        cert1 = X509Certificate.loadPEM(msg.Cert[2 if self.__isClient else 1])
+        cert2 = X509Certificate.loadPEM(msg.Cert[3 if self.__isClient else 2])
+        peerPubKeyBlock = cert2.getPublicKeyBlob()
+        # if self.__isClient:
+        #     self.serverPubKey = RSA.importKey(pubKeyBlock)
+        # else:
+        #     self.clientPubKey = RSA.importKey(pubKeyBlock)
+        self.peerPubKey = RSA.importKey(peerPubKeyBlock)
+        # 0. Check signature
+        if not self.checkSign(msg):
+            return False
+        # 1.server do check IP
+        if cert1.getSubject()["commonName"] != self.transport.getPeer()[0]:
+            self.log(errType.HANDSHAKE, "IP false")
+            return False
+        # 2, 3, 4: checkCerts
+        res = checkCerts(self, cert1, cert2)
+        if not res:
+            self.log(errType.HANDSHAKE, "checkCerts false")
+            return False
+        if self.__isClient:
+            # 5.public key check the signature of nonce1
+            checkSignature = intToNonce(int(clientNonce, 16) + 1) == msg.Cert[1]
+            if not checkSignature:
+                self.log(errType.HANDSHAKE, "wrong nonce1")
+                return False
+        else:
+            # get server's nonce
+            if msg.SessionID[:len(msg.Cert[0])] != msg.Cert[0]:
+                self.log(errType.HANDSHAKE, "wrong client nonce")
+                return False
+            self.serverNonce = msg.SessionID[len(msg.Cert[0]):]
+        return True
+
+
+    def checkTHSPacket(self, msg):
+        if not intToNonce(int(self.serverNonce, 16) + 1) == msg.Cert[0]:
+            self.log(errType.HANDSHAKE, "wrong signature")
+            return False
+        return True
+
+    # def checkDataPacket(self, msg):
+    #     if msg.WindowSize != self.windowSize:
+    #         self.log(errType.TRANSMISSION, "window size error")
+    #         return False
+    #     if msg.MaxSegSize != self.segSize:
+    #         self.log(errType.TRANSMISSION, "segment size error")
+    #         return False
+    #     return True
+
+    def buildAckPacket(self, msg, resetAck=False):
+        msgToSend = MyMessage()
+        self.__serverInitialSN += 1
+        msgToSend.SeqNum = self.__serverInitialSN
+        if resetAck:
+            msgToSend.AckNum = self.__ackNum
+        else:
+            msgToSend.AckNum = msg.SeqNum + len(msg.Data) + 1
+        msgToSend.AckFlag = True
+        msgToSend.WindowSize = self.windowSize
+        msgToSend.MaxSegSize = self.segSize
+        msgToSend.Signature = buildSign(msgToSend.__serialize__())
+        return msgToSend
+
+    def buildResetPacket(self):
+        msgToSend = MyMessage()
+        msgToSend.SeqNum = self.__clientInitialSN
+        msgToSend.SeqNumNotiFlag = True
+        msgToSend.ResetFlag = True
+        if self.__isClient:
+            msgToSend.SessionID = DEFAULT_CLIENT_SESSION
+            msgToSend.Cert = [str(clientNonce), self.myCertData, self.CACertData]
+        msgToSend.Signature = buildSign(msgToSend.__serialize__())
+        return msgToSend
+
+    def authenticationFail(self):
+        self.initialize()
+        self.transport.write(self.buildResetPacket().__serialize__())
+        if self.__isClient:
+            self.sm.signal(signal.SYN_SEND, "")
+
+    def initialize(self):
+        self.sm.signal(signal.RESET, "")
+        # once a data has all received, wait for next input of client
+        self.__ackNum = 0
+        self.__dataBuf = ""
+
+    def setSize(self, windowSize, segSize):
+        self.windowSize = min(windowSize, DEFAULT_WINDOW_SIZE)
+        self.segSize = min(segSize, DEFAULT_SEGMENT_SIZE)
+
+    def checkSign(self, msg):
+        checkSignature = checkPacketSign(self.clientPubKey, msg)
+        if not checkSignature:
+            self.log(errType.HANDSHAKE, "signature false")
+        return checkSignature
+
+    def log(self, type, msg):
+        print '[' + type + ']: ' + msg
+
+
+class MyServerFactory(StackingFactoryMixin, ServerFactory):
+    # protocolStack = {}
+    # FixedKey = "PASSWORD"
+    def buildProtocol(self, addr):
+        # print "server build"
+        # print self.protocolStack
+        return MyServerProtocol()
+
+
+# ------------------------------------------------------------------
+# below are client
 
 
 class MyClientProtocol(StackingProtocolMixin, Protocol):
@@ -535,14 +599,15 @@ class MyClientProtocol(StackingProtocolMixin, Protocol):
 
     def setupClientSM(self):
         self.sm.addState(state.SNN_SENT, (signal.ACK_RECEIVED, state.ESTABLISHED), (signal.RESET, state.SNN_SENT))
-        self.sm.addState(state.ESTABLISHED, (signal.CLOSE, state.CLOSEREQ), (signal.RESET, state.SNN_SENT), onEnter=self.onEstablished)
+        self.sm.addState(state.ESTABLISHED, (signal.CLOSE, state.CLOSEREQ), (signal.RESET, state.SNN_SENT),
+                         onEnter=self.onEstablished)
         self.sm.addState(state.CLOSEREQ, (signal.CLOSE_ACK, state.CLOSED), (signal.RESET, state.SNN_SENT))
         self.sm.addState(state.CLOSED, (signal.SYN_SEND, state.SNN_SENT), onEnter=self.onClose)
         self.sm.start(state.CLOSED)
 
     def onEstablished(self, signal, data):
         print '[ESTABLISHED]'
-        self.higherTransport = MyClientTransport(self.transport, self.__clientInitialSN + 1, self)
+        # self.higherTransport = MyServerTransport(self.transport, self.__clientInitialSN + 1, self)
         self.higherTransport.setSize(data.WindowSize, data.MaxSegSize)
         self.makeHigherConnection(self.higherTransport)
 
@@ -600,8 +665,6 @@ class MyClientProtocol(StackingProtocolMixin, Protocol):
             if msg.ResetFlag:
                 print "[CLIENT RESET]"
                 self.initialize()
-                self.sendFHSPacket()
-                self.sm.signal(signal.RESET, "")
             elif self.sm.currentState() == state.SNN_SENT:
                 self.stopTimer()
                 if not self.processHSSecond(msg):
@@ -612,9 +675,9 @@ class MyClientProtocol(StackingProtocolMixin, Protocol):
                 self.sm.signal(signal.CLOSE_ACK, "")
             else:
                 self.higherTransport.stopTimer()
-                if type(msg.Cert) == "list":
-                    if not self.processHSSecond(msg):
-                        return
+                # if type(msg.Cert) == "list":
+                #     if not self.processHSSecond(msg):
+                #         return
                 if msg.Data:
                     self.__dataBuf += msg.Data
                 if msg.PushFlag:
@@ -642,30 +705,7 @@ class MyClientProtocol(StackingProtocolMixin, Protocol):
         msgToSend.Signature = buildSign(msgToSend.__serialize__())
         return msgToSend
 
-    def checkSHSPacket(self, msg):
-        serverCert1 = X509Certificate.loadPEM(msg.Cert[2])  # a.b.c.d
-        serverCert2 = X509Certificate.loadPEM(msg.Cert[3])  # a.b.c
-        # get server public key
-        serverPubKeyBlock = serverCert2.getPublicKeyBlob()
-        self.serverPubKey = RSA.importKey(serverPubKeyBlock)
-        # 0. Check signature
-        if not self.checkSign(msg):
-            return False
-        # 1.client do check IP
-        if serverCert1.getSubject()["commonName"] != self.transport.getPeer()[0]:
-            self.log(errType.HANDSHAKE, "IP false")
-            return False
-        # 2, 3, 4: checkCerts
-        res = checkCerts(self, serverCert1, serverCert2)
-        if not res:
-            self.log(errType.HANDSHAKE, "checkCerts false")
-            return False
-        # 5.public key check the signature of nonce1
-        checkSignature = intToNonce(int(clientNonce, 16) + 1) == msg.Cert[1]
-        if not checkSignature:
-            self.log(errType.HANDSHAKE, "wrong nonce1")
-            return False
-        return True
+    # def checkSHSPacket(self, msg):
 
     def sendTHSPacket(self, msg):
         msgToSend = MyMessage()
@@ -697,12 +737,12 @@ class MyClientProtocol(StackingProtocolMixin, Protocol):
 class MyClientFactory(StackingFactoryMixin, ClientFactory):
     def buildProtocol(self, addr):
         # print "client build"
-        return MyClientProtocol(self)
+        return MyClientProtocol(self, True)
 
-    # def clientConnectionLost(self, connector, reason):
-    #     # print('line670, Lost connection.  Reason:', reason)
-    #     connector.connect()
-    #     # reactor.stop()
+        # def clientConnectionLost(self, connector, reason):
+        #     # print('line670, Lost connection.  Reason:', reason)
+        #     connector.connect()
+        #     # reactor.stop()
 
 
 # ------------------------------------------
@@ -754,6 +794,7 @@ def checkPacketSign(key, packet):
     sign = packet.Signature
     packet.Signature = ""
     return checkSign(key, packet.__serialize__(), sign)
+
 
 def intToNonce(i):
     h = hex(i)
