@@ -14,10 +14,12 @@ class httpServer(protocol.Protocol):
         # if data == "close":
         #     self.transport.loseConnection()
         #     return
+        # print data
+        print '>>>', data
         self.transport.write(data)
 
     def dataReceived(self, data):
-        print 'success:' + data
+        print '<<<' + data
         self.transport.write(data)
 
 
@@ -45,7 +47,8 @@ class stdIO(LineReceiver):
     delimiter = '\n'
 
     def connectionMade(self):
-        self.transport.write('>>>>')
+        pass
+        # self.transport.write('>>>>')
 
     def lineReceived(self, line):
         server.sendMsg(line)

@@ -11,11 +11,12 @@ class httpClient(protocol.Protocol):
         print("Higher Connection Made")
 
     def dataReceived(self, data):
-        print(data)
-        sys.stdout.write('>>>')
+        print '<<<', data
+        # sys.stdout.write('>>>')
         sys.stdout.flush()
 
     def sendMsg(self, data):
+        print '>>>', data
         if data == "close":
             self.transport.loseConnection()
             return
@@ -60,7 +61,7 @@ class stdIO(LineReceiver):
 global client
 client = httpClient()
 stdio.StandardIO(stdIO())
-endpoint = GateClientEndpoint.CreateFromConfig(reactor, '20164.1.3414.2414', 19090, 'gatekey2',
+endpoint = GateClientEndpoint.CreateFromConfig(reactor, '20164.1.3414.2414', 19090, 'gatekey1',
                                                networkStack=lab2stack)
 endpoint.connect(httpClientFactory())
 reactor.run()

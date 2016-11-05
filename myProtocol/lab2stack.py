@@ -16,7 +16,8 @@
 
 # PROBLEMS:
 # no recovery
-# PATHONPATH=~/network/playground-fall-2016/src/ python test_throughput.py res.txt ~/network/playground-fall-2016/src/ --stack=apps.samples.lab2stack
+# PATHONPATH=~/network/playground-fall-2016/src/ python test_throughput.py
+# res.txt ~/network/playground-fall-2016/src/ --stack=apps.samples.lab2stack
 
 import os
 import threading
@@ -31,8 +32,7 @@ from playground.network.common.Protocol import StackingTransport, \
     StackingProtocolMixin, StackingFactoryMixin, MessageStorage
 from playground.network.common.statemachine import StateMachine
 from playground.network.message.ProtoBuilder import MessageDefinition
-from playground.network.message.StandardMessageSpecifiers import STRING, UINT4, BOOL1, DEFAULT_VALUE, LIST, OPTIONAL, \
-    UINT1
+from playground.network.message.StandardMessageSpecifiers import STRING, UINT4, BOOL1, DEFAULT_VALUE, LIST, OPTIONAL
 from twisted.internet import error
 from twisted.internet.protocol import Protocol, ClientFactory, ServerFactory
 from twisted.python import failure
@@ -74,25 +74,26 @@ class MyMessage(MessageDefinition):
 
 
 class state(object):
-    SNN_SENT = "first SNN sent"
+    SNN_SENT = "SNN sent"
     ESTABLISHED = "Established"
     CLOSEREQ = "Close request"
     CLOSERECV = "Close request received"
     CLOSED = "Closed"
     # server
     LISTENING = "Listening"
-    SNN_RECV = "SNN received and have sent ack"
+    SNN_RECV = "SNN received"
 
 
 class signal(object):
-    SYN_SEND = "SNN sent"
+    SNN_SEND = "SNN sent"
     ACK_RECEIVED = "Acknowledgement received"
     CLOSE = "Close"
+    CLOSING = "Closing"
     CLOSE_REQ = "Close request"
     CLOSE_ACK = "Close acknowledgement"
     RESET = "reset"
     # server
-    SYN_RECEIVED = "Handshake syn flag received"
+    SNN_RECEIVED = "Handshake SNN received"
 
 
 class errType(object):
@@ -104,114 +105,70 @@ class errType(object):
 # ----------------------------------
 # server
 class RIPTransport(StackingTransport):
-    __resendsSeq = []  # store currently sent packets' SeqNum
-    __resendsValue = []  # store currently sent packets' data
-    __lastAckNum = 0  # store the next AckNum, so if the received AckNum smaller than it, some packets should be resent
+    __dataValues = []
+    __dataSeqs = []
+    __lastDataLen = 0
+    __lastDataPacket = ""
 
     def __init__(self, lowerTransport, initSeqNum, protocol):
-        self.__initPacketSN = initSeqNum
+        print 'init', initSeqNum
         self.__seqNum = initSeqNum
         self.__protocol = protocol
-        self.__timer = threading.Timer(120, self.reSendDataPacket, 0)
+        self.__timer = ""
         StackingTransport.__init__(self, lowerTransport)
 
-    def write(self, data):
-        count = 1
-        raw = []
-        self.__dataValues = []
-        self.__dataSeqs = []
-        while data:
-            raw.append([self.__seqNum + count * (DEFAULT_SEGMENT_SIZE + 1), data[:DEFAULT_SEGMENT_SIZE]])
-            data = data[DEFAULT_SEGMENT_SIZE:]
-            count += 1
-        raw.sort()
-        for ele in raw:
-            self.__dataSeqs.append(ele[0])
-            self.__dataValues.append(ele[1])
-        self.sendMsg(0)
-
-    def loseConnection(self):
-        self.lowerTransport().write(self.buildClosePacket().__serialize__())
-        self.__protocol.setSMCloseReq()
-        self.startTimer(1)
-
-    def sendMsg(self, ackNum):
-        self.__resendsSeq = []
-        self.__resendsValue = []
-        # pushFlag = False
-        start = 0
-        if ackNum:
-            if ackNum < self.__lastAckNum:
-                self.reSendDataPacket(ackNum)
-                # print "line438"
-                self.startTimer()
-                return
-            else:
-                try:
-                    start = self.__dataSeqs.index(ackNum)
-                except Exception, e:
-                    print e
-        for i in range(start, start + DEFAULT_WINDOW_SIZE):
-            if i < len(self.__dataSeqs):
-                # if i == len(self.__dataSeqs) - 1:
-                # pushFlag = True
-                packet = self.buildDataPacket(self.__dataSeqs[i], self.__dataValues[i])
-                self.__resendsSeq.append(self.__dataSeqs[i])
-                self.__resendsValue.append(self.__dataValues[i])
-                self.lowerTransport().write(packet.__serialize__())
-        self.__protocol.sm.currentState() != state.CLOSED and self.startTimer()
-        self.__lastAckNum = start + DEFAULT_WINDOW_SIZE < len(self.__dataSeqs) and self.__dataSeqs[start + DEFAULT_WINDOW_SIZE]
-
-    def startTimer(self, state=0):
-        # print "start timer"
-        if state:
-            self.__timer = threading.Timer(120, self.reSendClosePacket)
-        else:
-            self.__timer = threading.Timer(120, self.reSendDataPacket, 0)
+    def startTimer(self):
+        # print '[TRANSPORTTIMER] start'
+        self.__timer = threading.Timer(120, self.resendDataPacket)
         self.__timer.start()
 
     def stopTimer(self):
-        # print "stop timer"
+        # print '[TRANSPORTTIMER] stop'
         self.__timer and self.__timer.cancel()
 
-    def buildDataPacket(self, seq, data, push=False):
+    def write(self, data):
+        while data:
+            if self.__lastDataLen < DEFAULT_SEGMENT_SIZE:
+                self.__seqNum += self.__lastDataLen
+            else:
+                self.__seqNum += DEFAULT_SEGMENT_SIZE
+            self.__dataSeqs.append(self.__seqNum)
+            self.__dataValues.append(data[:DEFAULT_SEGMENT_SIZE])
+            self.__lastDataLen = len(self.__dataValues[len(self.__dataValues) - 1])
+            data = data[DEFAULT_SEGMENT_SIZE:]
+        # print self.__dataSeqs
+        # print self.__dataValues
+        self.sendMsg()
+
+    def loseConnection(self):
+        self.__protocol.closeConnection()
+
+    def sendMsg(self):
+        self.stopTimer()
+        if len(self.__dataSeqs):
+            packet = self.buildDataPacket()
+            self.lowerTransport().write(packet.__serialize__())
+            self.__lastDataPacket = packet
+            self.startTimer()
+
+    def resendDataPacket(self):
+        self.lowerTransport().write(self.__lastDataPacket.__serialize__())
+        self.startTimer()
+
+    def buildDataPacket(self):
         packet = MyMessage()
-        packet.SeqNum = seq
-        packet.Data = data
-        # packet.PushFlag = push
+        packet.SeqNum = self.__dataSeqs[0]
+        packet.Data = self.__dataValues[0]
         packet.Signature = buildSign(packet.__serialize__())
+        self.__dataSeqs.pop(0)
+        self.__dataValues.pop(0)
         return packet
 
-    def reSendDataPacket(self, ackNum):
-        if not ackNum:
-            t = 0
-        else:
-            t = self.__resendsSeq.index(ackNum)
-        for i in range(t, DEFAULT_WINDOW_SIZE):
-            self.lowerTransport().write(
-                self.buildDataPacket(self.__resendsSeq[i], self.__resendsValue[i]).__serialize__())
-            # self.startTimer()
-            # print "resenddata"
 
-    def reSendClosePacket(self):
-        self.lowerTransport().write(self.buildClosePacket(self.__initPacketSN).__serialize__())
-        # self.startTimer(1)
-        # print "resendclose"
-
-    def buildClosePacket(self):
-        packet = MyMessage()
-        packet.SeqNum = self.__seqNum
-        packet.CloseFlag = True
-        packet.Signature = buildSign(packet.__serialize__())
-        return packet
-
-
-
-class MyServerProtocol(StackingProtocolMixin, Protocol):
+class RIProtocol(StackingProtocolMixin, Protocol):
     __initialSN = random.randint(0, pow(2, 32))
 
     def __init__(self, isClient=False):
-        # self.__protocolStack = protocolStack
         self.__isClient = isClient
         self.sm = StateMachine("StateMachine")
         self.__storage = MessageStorage()
@@ -222,58 +179,46 @@ class MyServerProtocol(StackingProtocolMixin, Protocol):
         self.CACertData = certs[1]
 
         self.__buffer = ""  # for data received
-        # self.__bufCount = 0  # for count packet until it reachs WindowSize
-        self.__dataBuf = ""  # store the data received
         self.__lastPacket = ""  # the last sent packet used when reset flag is true
         self.__timer = threading.Timer(120, self.reSendLastPacket)
         self.__dataPacketSeq = []  # store all the packet SeqNum received, used for check
-        self.__ackNum = 0  #
-        # self.__nextSeqNum = self.__initialSN  # next packet's sequence number
-        # self.__buffer = ""
-        # self.__dataBuf = ""
-
-        # self.__timer = threading.Timer(120, self.resendHS, self.sm.currentState())
+        self.__ackNum = 0
+        self.__peerISN = 0
+        self.higherTransport = ""
 
     def setupServerSM(self):
-        self.sm.addState(state.LISTENING, (signal.SYN_RECEIVED, state.SNN_RECV), (signal.SYN_SEND, state.SNN_SENT),
+        self.sm.addState(state.LISTENING, (signal.SNN_RECEIVED, state.SNN_RECV), (signal.SNN_SEND, state.SNN_SENT),
                          onEnter=self.onClose)
-        self.sm.addState(state.SNN_SENT, (signal.ACK_RECEIVED, state.ESTABLISHED), (signal.RESET, state.LISTENING))
-        self.sm.addState(state.SNN_RECV, (signal.ACK_RECEIVED, state.ESTABLISHED), (signal.RESET, state.LISTENING))
+        self.sm.addState(state.SNN_SENT, (signal.ACK_RECEIVED, state.ESTABLISHED),
+                         (signal.RESET, state.LISTENING))  # client
+        self.sm.addState(state.SNN_RECV, (signal.ACK_RECEIVED, state.ESTABLISHED),
+                         (signal.RESET, state.LISTENING))  # server
         self.sm.addState(state.ESTABLISHED, (signal.CLOSE_REQ, state.CLOSERECV),
-                         (signal.CLOSE, state.CLOSEREQ), (signal.RESET, state.SNN_RECV), onEnter=self.onEstablished)
-
+                         (signal.CLOSING, state.CLOSEREQ), (signal.RESET, state.SNN_RECV), onEnter=self.onEstablished)
         self.sm.addState(state.CLOSEREQ, (signal.CLOSE_ACK, state.LISTENING), (signal.RESET, state.LISTENING))
         self.sm.addState(state.CLOSERECV, (signal.CLOSE, state.LISTENING))
-        # ESTABLISHED receive close packet and change to CLOSERECV, after send the ACK, change to LISTENING
-        # so from ESTABLISHED to LISTENGING only receive one packet, in CLOSERECV state won't receive packet
-        # self.sm.addState(state.CLOSED, onEnter=self.onClose)
         self.sm.start(state.LISTENING)
-
-        # self.sm.addState(state.ESTABLISHED, (signal.CLOSE, state.CLOSEREQ), (signal.RESET, state.SNN_SENT), onEnter=self.onEstablished)
 
     def onClose(self, signal, data):
         if self.__isClient:
-            print '[CLOSED]'
             del self.__timer
             self.transport.loseConnection()
 
     def onEstablished(self, signal, data):
         print '[ESTABLISHED]'
-        self.higherTransport = RIPTransport(self.transport, self.__nextSeqNum, self)
+        self.higherTransport = RIPTransport(self.transport, self.__initialSN + 1, self)
         self.makeHigherConnection(self.higherTransport)
 
     def connectionMade(self):
-        self.sendFHSPacket()
-        # self.__protocolStack[self.transport.getPeer()[0]] = self
-        # self.higherTransport = MyServerTransport(self.transport)
-        # self.makeHigherConnection(self.higherTransport)
+        # print '[CHECK] connection made'
+        if self.__isClient:
+            self.sendFHSPacket()
 
     def sendFHSPacket(self):
-        # print 'first sent'
         msgToSend = self.buildFHSPacket()
         self.transport.write(msgToSend.__serialize__())
         self.__lastPacket = msgToSend
-        self.sm.signal(signal.SYN_SEND, "")
+        self.sm.signal(signal.SNN_SEND, "")
         self.startTimer()
 
     def buildFHSPacket(self):
@@ -286,29 +231,24 @@ class MyServerProtocol(StackingProtocolMixin, Protocol):
         return initialMsg
 
     def connectionLost(self, reason=connectionDone):
+        print '[CLOSED]'
         if reason.getErrorMessage() == connectionDone.getErrorMessage():
             self.higherProtocol().connectionLost(reason)
 
     def startTimer(self):
+        # print '[TIMER] start'
         self.__timer = threading.Timer(120, self.reSendLastPacket)
-        # self.__timer = threading.Timer(120, self.resendHS)
-        # self.__timer.start()
         self.__timer.start()
 
     def stopTimer(self):
+        # print '[TIMER] stop'
         self.__timer and self.__timer.cancel()
-
-    def resendHS(self):
-        if self.sm.currentState() == state.SNN_SENT:
-            print "[RESEND HANDSHAKE]"
-            self.sendFHSPacket()
 
     def reSendLastPacket(self):
         self.transport.write(self.__lastPacket)
 
     def dataReceived(self, data):
         self.stopTimer()
-        # print "[dataReceived]"  # my IP
         self.__buffer += data
         while self.__buffer:
             msg, byte = MyMessage.Deserialize(self.__buffer)
@@ -316,16 +256,13 @@ class MyServerProtocol(StackingProtocolMixin, Protocol):
             self.__buffer = self.__buffer[byte:]
         for msg in self.__storage.iterateMessages():
             # after handshake phase 1, got clientPubKey, then authenticate
-            if self.sm.currentState() != state.LISTENING or self.sm.currentState() != state.SNN_SENT:
-                if not self.checkSign(msg):  # hasattr(self, 'clientPubKey'):
-                    # failed during data exchange, pass
-                    # failed during handshake, reset
-                    # if self.sm.currentState() == state.SNN_RECV:
+            if (self.sm.currentState() != state.LISTENING and not self.__isClient) or (
+                            self.sm.currentState() != state.SNN_SENT and self.__isClient):
+                if not self.checkSign(msg):
                     if self.sm.currentState() != state.ESTABLISHED:
                         self.authenticationFail()
                 elif msg.ResetFlag:
-                    # all reset packets include SNN
-                    # print "[SERVER RESET]"
+                    # print "[RESET]", self.__isClient
                     if not msg.SeqNum == self.__peerISN - 1:
                         continue
                     self.initialize()
@@ -335,40 +272,44 @@ class MyServerProtocol(StackingProtocolMixin, Protocol):
                         if not self.processHSFirst(msg):  # server
                             self.authenticationFail()
                             return
-                        self.sm.signal(signal.SYN_RECEIVED, msg)
-                return
-            if msg.SeqNum != self.__ackNum:
-                continue
+                        self.sm.signal(signal.SNN_RECEIVED, msg)
+                    return
             if self.sm.currentState() == state.LISTENING:  # handshake phase 1
                 if not self.processHSFirst(msg):
                     self.authenticationFail()
                     return
-                self.sm.signal(signal.SYN_RECEIVED, msg)
+                self.sm.signal(signal.SNN_RECEIVED, msg)
             elif self.sm.currentState() == state.SNN_SENT:  # handshake phase 2
                 if not self.processHSSecond(msg):
                     self.authenticationFail()
                     return
                 self.sm.signal(signal.ACK_RECEIVED, msg)
             elif self.sm.currentState() == state.SNN_RECV:  # handshake phase 3
+                if msg.SeqNum != self.__ackNum:
+                    continue
                 if not self.processHSThird(msg):
                     self.authenticationFail()
                     return
                 self.sm.signal(signal.ACK_RECEIVED, msg)
             elif self.sm.currentState() == state.CLOSEREQ:
                 # self.higherTransport.stopTimer()
-                self.sm.signal(signal.CLOSE_ACK, "")
+                if msg.SeqNum == self.__peerISN:
+                    self.sm.signal(signal.CLOSE_ACK, "")
             elif self.sm.currentState() == state.ESTABLISHED:
                 # self.higherTransport.stopTimer()
                 if msg.CloseFlag:
-                    print '[CLOSED]'
-                    if msg.SeqNum == self.__peerISN:
+                    if msg.SeqNum == self.__peerISN - 1:
                         self.sm.signal(signal.CLOSE_REQ, msg)
-                        self.higherTransport.write(self.buildAckPacket(msg))
+                        self.transport.write(self.buildCloseAckPacket(msg).__serialize__())
                         self.sm.signal(signal.CLOSE, msg)
-                elif self.__isClient:
+                        print '[CLOSED]'
+                elif msg.AckFlag:  # recv ack
                     # print "[CHECK] data received"
-                    self.higherTransport.sendMsg(msg.AckNum)
-                else:
+                    self.higherTransport.sendMsg()
+                else:  # recv data
+                    if msg.SeqNum != self.__ackNum:
+                        self.log(errType.TRANSMISSION, "seq num false")
+                        continue
                     self.processData(msg)
 
     def processHSFirst(self, msg):  # server
@@ -378,6 +319,7 @@ class MyServerProtocol(StackingProtocolMixin, Protocol):
         msgToSend = self.sendSHSPacket(msg)
         self.transport.write(msgToSend.__serialize__())
         self.__lastPacket = msgToSend
+        self.startTimer()
         # print '[CHECK] phase 1 end'
         return True
 
@@ -419,41 +361,32 @@ class MyServerProtocol(StackingProtocolMixin, Protocol):
             return False
         # no need to add ACK or nextSEQ
         # self.__ackNum = msg.SeqNum + (len(msg.Data) or 1)
-        print '[ESTABLISHED]'
         return True
 
     def processData(self, msg):
-        # self.__dataPacketSeq.append(msg.SeqNum)
-        # if self.__bufCount < self.windowSize:
-        #     # not all data packets received
-        #     self.__dataBuf += msg.Data
-        #     self.__bufCount += 1
-        #     self.__ackNum = msg.SeqNum + len(msg.Data) + 1
-        # if self.__bufCount == self.windowSize or msg.PushFlag:
-        # have received all packets, send ack
-        # self.__bufCount = 0
         packetToSent = self.buildAckPacket(msg)
-        # if msg.PushFlag:
-        self.higherProtocol() and self.higherProtocol().dataReceived(self.__dataBuf)
-        self.initialize()
-        # packetToSent.PushFlag = True
-        self.higherTransport.write(packetToSent)
+        self.transport.write(packetToSent.__serialize__())
+        self.higherProtocol() and self.higherProtocol().dataReceived(msg.Data)
+
+    def buildAckPacket(self, msg):
+        msgToSend = MyMessage()
+        msgToSend.SeqNum = self.__initialSN + 1
+        self.__ackNum = msg.SeqNum + len(msg.Data)
+        msgToSend.AckNum = self.__ackNum
+        msgToSend.AckFlag = True
+        msgToSend.Signature = buildSign(msgToSend.__serialize__())
+        return msgToSend
 
     def checkHSPacket(self, msg):
         cert1 = X509Certificate.loadPEM(msg.Cert[2 if self.__isClient else 1])
         cert2 = X509Certificate.loadPEM(msg.Cert[3 if self.__isClient else 2])
         peerPubKeyBlock = cert2.getPublicKeyBlob()
-        # if self.__isClient:
-        #     self.serverPubKey = RSA.importKey(pubKeyBlock)
-        # else:
-        #     self.clientPubKey = RSA.importKey(pubKeyBlock)
         self.peerPubKey = RSA.importKey(peerPubKeyBlock)
-        # check Ack
         # 0. Check signature
         if not self.checkSign(msg):
             return False
         # 1.server do check IP
-        if cert1.getSubject()["commonName"] != self.transport.getPeer()[0]:
+        if cert1.getSubject()["commonName"] != self.transport.getPeer().host:
             self.log(errType.HANDSHAKE, "IP false")
             return False
         # 2, 3, 4: checkCerts
@@ -475,33 +408,32 @@ class MyServerProtocol(StackingProtocolMixin, Protocol):
             self.serverNonce = msg.SessionID[len(msg.Cert[0]):]
         return True
 
-
     def checkTHSPacket(self, msg):
         if not intToNonce(int(self.serverNonce, 16) + 1) == msg.Cert[0]:
             self.log(errType.HANDSHAKE, "wrong signature")
             return False
         return True
 
-    # def checkDataPacket(self, msg):
-    #     if msg.WindowSize != self.windowSize:
-    #         self.log(errType.TRANSMISSION, "window size error")
-    #         return False
-    #     if msg.MaxSegSize != self.segSize:
-    #         self.log(errType.TRANSMISSION, "segment size error")
-    #         return False
-    #     return True
-
-    def buildAckPacket(self, msg, resetAck=False):
+    def buildCloseAckPacket(self, msg):
         msgToSend = MyMessage()
-        self.__serverInitialSN += 1
-        msgToSend.SeqNum = self.__serverInitialSN
-        if resetAck:
-            msgToSend.AckNum = self.__ackNum
-        else:
-            msgToSend.AckNum = msg.SeqNum + len(msg.Data) + 1
+        msgToSend.SeqNum = self.__initialSN + 1
+        self.__ackNum = msg.SeqNum + len(msg.Data)
+        msgToSend.AckNum = self.__ackNum
         msgToSend.AckFlag = True
         msgToSend.Signature = buildSign(msgToSend.__serialize__())
         return msgToSend
+
+    def closeConnection(self):
+        self.transport.write(self.buildClosePacket().__serialize__())
+        self.sm.signal(signal.CLOSING, "")
+        self.startTimer()
+
+    def buildClosePacket(self):
+        packet = MyMessage()
+        packet.SeqNum = self.__initialSN
+        packet.CloseFlag = True
+        packet.Signature = buildSign(packet.__serialize__())
+        return packet
 
     def buildResetPacket(self):
         msgToSend = MyMessage()
@@ -515,20 +447,21 @@ class MyServerProtocol(StackingProtocolMixin, Protocol):
         return msgToSend
 
     def authenticationFail(self):
+        # print "[CHECK] fail"
         self.initialize()
         self.transport.write(self.buildResetPacket().__serialize__())
         if self.__isClient:
-            self.sm.signal(signal.SYN_SEND, "")
+            self.sm.signal(signal.SNN_SEND, "")
 
     def initialize(self):
         self.sm.signal(signal.RESET, "")
         self.__ackNum = 0
-        self.__dataBuf = ""
+        # self.__dataBuf = ""
         self.__lastPacket = ""
         self.__buffer = ""
 
     def checkSign(self, msg):
-        checkSignature = checkPacketSign(self.clientPubKey, msg)
+        checkSignature = checkPacketSign(self.peerPubKey, msg)
         if not checkSignature:
             self.log(errType.HANDSHAKE, "signature false")
         return checkSignature
@@ -543,170 +476,16 @@ class MyServerFactory(StackingFactoryMixin, ServerFactory):
     def buildProtocol(self, addr):
         # print "server build"
         # print self.protocolStack
-        return MyServerProtocol()
+        return RIProtocol()
 
 
 # ------------------------------------------------------------------
 # below are client
 
-
-class MyClientProtocol(StackingProtocolMixin, Protocol):
-    __clientInitialSN = random.randint(0, pow(2, 32))
-
-    def __init__(self, factory):
-        self.__factory = factory
-        self.__storage = MessageStorage()
-        self.__buffer = ""
-        self.__dataBuf = ""
-
-        self.sm = StateMachine("ClientStateMachine")
-        self.setupClientSM()
-        # self.__timer = threading.Timer(120, self.resendHS, self.sm.currentState())
-
-        certs = CertFactory.getCertsForAddr()
-        self.myCertData = certs[0]
-        self.CACertData = certs[1]
-
-    def setupClientSM(self):
-        self.sm.addState(state.SNN_SENT, (signal.ACK_RECEIVED, state.ESTABLISHED), (signal.RESET, state.SNN_SENT))
-        self.sm.addState(state.ESTABLISHED, (signal.CLOSE, state.CLOSEREQ), (signal.RESET, state.SNN_SENT),
-                         onEnter=self.onEstablished)
-        self.sm.addState(state.CLOSEREQ, (signal.CLOSE_ACK, state.CLOSED), (signal.RESET, state.SNN_SENT))
-        self.sm.addState(state.CLOSED, (signal.SYN_SEND, state.SNN_SENT), onEnter=self.onClose)
-        self.sm.start(state.CLOSED)
-
-    def onEstablished(self, signal, data):
-        print '[ESTABLISHED]'
-        # self.higherTransport = MyServerTransport(self.transport, self.__clientInitialSN + 1, self)
-        self.makeHigherConnection(self.higherTransport)
-
-    def onClose(self, signal, data):
-        print '[CLOSED]'
-        del self.__timer
-        self.transport.loseConnection()
-        # self.higherTransport.loseConnection()
-
-    def startTimer(self):
-        self.__timer = threading.Timer(120, self.resendHS)
-        self.__timer.start()
-
-    def stopTimer(self):
-        self.__timer.cancel()
-
-    def resendHS(self):
-        if self.sm.currentState() == state.SNN_SENT:
-            print "[RESEND HANDSHAKE]"
-            self.sendFHSPacket()
-
-    def connectionMade(self):
-        self.sendFHSPacket()
-        self.sm.signal(signal.SYN_SEND, "")
-
-    def connectionLost(self, reason=connectionDone):
-        if reason.getErrorMessage() == connectionDone.getErrorMessage():
-            self.higherProtocol().connectionLost(reason)
-
-    def sendFHSPacket(self):
-        # print 'first sent'
-        self.transport.write(self.buildFHSPacket().__serialize__())
-        self.startTimer()
-
-    def buildFHSPacket(self):
-        initialMsg = MyMessage()
-        initialMsg.SeqNum = self.__clientInitialSN
-        initialMsg.SeqNumNotiFlag = True
-        initialMsg.SessionID = DEFAULT_CLIENT_SESSION
-        initialMsg.Cert = [str(clientNonce), self.myCertData, self.CACertData]
-        initialMsg.Signature = buildSign(initialMsg.__serialize__())
-        return initialMsg
-
-    def dataReceived(self, data):
-        self.__buffer += data
-        while self.__buffer:
-            msg, byte = MyMessage.Deserialize(self.__buffer)
-            self.__storage.update(self.__buffer[:byte])
-            self.__buffer = self.__buffer[byte:]
-        for msg in self.__storage.iterateMessages():
-            if self.sm.currentState() != state.SNN_SENT:  # hasattr(self, 'clientPubKey'):
-                if not self.checkSign(msg):
-                    self.authenticationFail()
-                    return
-            if msg.ResetFlag:
-                print "[CLIENT RESET]"
-                self.initialize()
-            elif self.sm.currentState() == state.SNN_SENT:
-                self.stopTimer()
-                if not self.processHSSecond(msg):
-                    return
-                self.sm.signal(signal.ACK_RECEIVED, msg)
-            elif self.sm.currentState() == state.CLOSEREQ:
-                self.higherTransport.stopTimer()
-                self.sm.signal(signal.CLOSE_ACK, "")
-            else:
-                self.higherTransport.stopTimer()
-                # if type(msg.Cert) == "list":
-                #     if not self.processHSSecond(msg):
-                #         return
-                if msg.Data:
-                    self.__dataBuf += msg.Data
-                if msg.PushFlag:
-                    self.higherProtocol() and self.higherProtocol().dataReceived(self.__dataBuf)
-                    self.initialize()
-                else:
-                    self.higherTransport.sendMsg(msg.AckNum)
-
-    def processHSSecond(self, msg):
-        if not self.checkSHSPacket(msg):
-            self.transport.write(self.buildResetPacket().__serialize__())
-            return False
-        msgToSend = self.sendTHSPacket(msg)
-        self.transport.write(msgToSend.__serialize__())  # try to transport my msg
-        print '[CHECK] client shakehand end'
-        return True
-
-    def initialize(self):
-        self.__dataBuf = ""
-
-    def buildResetPacket(self):
-        msgToSend = self.buildFHSPacket()
-        msgToSend.ResetFlag = True
-        msgToSend.Signature = ""
-        msgToSend.Signature = buildSign(msgToSend.__serialize__())
-        return msgToSend
-
-    # def checkSHSPacket(self, msg):
-
-    def sendTHSPacket(self, msg):
-        msgToSend = MyMessage()
-        msgToSend.Cert = [intToNonce(int(msg.Cert[0], 16) + 1)]
-        msgToSend.SeqNum = self.__clientInitialSN
-        # msgToSend.SeqNumNotiFlag = True
-        msgToSend.SessionID = DEFAULT_CLIENT_SESSION
-        msgToSend.AckNum = msg.SeqNum + 1
-        msgToSend.AckFlag = True
-        msgToSend.Signature = buildSign(msgToSend.__serialize__())
-        return msgToSend
-
-    def authenticationFail(self):
-        self.higherTransport.write(self.buildResetPacket())
-
-    def checkSign(self, msg):
-        checkSignature = checkPacketSign(self.serverPubKey, msg)
-        if not checkSignature:
-            self.log(errType.HANDSHAKE, "signature false")
-        return checkSignature
-
-    def setSMCloseReq(self):
-        self.sm.signal(signal.CLOSE, "")
-
-    def log(self, type, msg):
-        print '[' + type + ']: ' + msg
-
-
 class MyClientFactory(StackingFactoryMixin, ClientFactory):
     def buildProtocol(self, addr):
         # print "client build"
-        return MyClientProtocol(self, True)
+        return RIProtocol(True)
 
         # def clientConnectionLost(self, connector, reason):
         #     # print('line670, Lost connection.  Reason:', reason)
