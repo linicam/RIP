@@ -23,7 +23,7 @@ class httpClient(protocol.Protocol):
         self.transport.write(data)
 
     def connectionLost(self, reason):
-        print "connection lost"
+        print "[CLIENT] connection lost"
         # reactor.stop()
 
 

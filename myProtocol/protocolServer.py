@@ -11,16 +11,20 @@ class httpServer(protocol.Protocol):
         pass
 
     def sendMsg(self, data):
-        # if data == "close":
-        #     self.transport.loseConnection()
-        #     return
-        # print data
         print '>>>', data
+        if data == "close":
+            self.transport.loseConnection()
+            return
+        # print data
         self.transport.write(data)
 
     def dataReceived(self, data):
         print '<<<' + data
         self.transport.write(data)
+
+    def connectionLost(self, reason):
+        print "[SERVER] connection lost"
+        # reactor.stop()
 
 
 class httpServerFactory(protocol.Factory):
