@@ -126,7 +126,7 @@ class RIPTransport(StackingTransport):
         # log(errType.TIMER, 'transport stop')
         self.__timer and self.__timer.cancel()
         if ackNum != self.__seqNum:
-            log(errType.CHECK, '{0} | {1} | {2}'.format(ackNum, self.__seqNum, self.__lastDataPacket.SeqNum))
+            # log(errType.CHECK, '{0} | {1} | {2}'.format(ackNum, self.__seqNum, self.__lastDataPacket.SeqNum))
             if ackNum == self.__lastDataPacket.SeqNum:
                 self.resendDataPacket()
                 return
@@ -215,7 +215,7 @@ class RIProtocol(StackingProtocolMixin, Protocol):
         self.sm.start(state.LISTENING)
 
     def onEstablished(self, sig, data):
-        log(errType.CHECK, '{0} established'.format(self.__isClient))
+        # log(errType.CHECK, '{0} established'.format(self.__isClient))
         self.higherTransport = RIPTransport(self.transport, self.__initialSN + 1, self)
         self.makeHigherConnection(self.higherTransport)
 
@@ -281,7 +281,7 @@ class RIProtocol(StackingProtocolMixin, Protocol):
                     if self.sm.currentState() != state.ESTABLISHED:
                         self.authenticationFail()
                 elif msg.ResetFlag:
-                    # print "[RESET]", self.__isClient
+                    # log(errType.CHECK, 'reset {0}'.format(self.__isClient))
                     if not msg.SeqNum == self.__peerISN - 1:
                         continue
                     self.initialize()
@@ -468,7 +468,7 @@ class RIProtocol(StackingProtocolMixin, Protocol):
         return msgToSend
 
     def closeConnection(self):
-        print "[CHECK] closing", self.__isClient
+        # log(errType.CHECK, '[CHECK] closing {0}'.format(self.__isClient))
         self.transport.write(self.buildClosePacket().__serialize__())
         self.sm.signal(signal.CLOSING, "")
         self.startTimer()
