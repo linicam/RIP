@@ -46,7 +46,6 @@ TIMEOUT = 0.5
 # HARD CODE HERE
 rootCertData = CertFactory.getRootCert()
 rootCert = X509Certificate.loadPEM(rootCertData)
-priKey = RSA.importKey(CertFactory.getPrivateKeyForAddr())
 
 clientNonce = os.urandom(8).encode('hex')  # random.randint(0, 65535)
 serverNonce = os.urandom(8).encode('hex')
@@ -154,7 +153,7 @@ class RIPTransport(StackingTransport):
         packet = MyMessage()
         packet.SeqNum = self.__seqNum
         packet.Data = data
-        packet.Signature = buildSign(packet.__serialize__())
+        packet.Signature = self.__protocol.buildSign(packet.__serialize__())
         return packet
 
     def loseConnection(self):
@@ -188,9 +187,9 @@ class RIProtocol(StackingProtocolMixin, Protocol):
         self.__storage = MessageStorage()
         self.setupServerSM()
 
-        certs = CertFactory.getCertsForAddr()
-        self.myCertData = certs[0]
-        self.CACertData = certs[1]
+        self.priKey = ""
+        self.myCertData = ""
+        self.CACertData = ""
 
         self.__buffer = ""  # for data received
         self.__lastPacket = MyMessage()  # the last sent packet used when reset flag is true
@@ -221,6 +220,11 @@ class RIProtocol(StackingProtocolMixin, Protocol):
 
     def connectionMade(self):
         # log(errType.CHECK, self.__isClient + " connection made")
+        addr = self.transport.getPeer().host
+        self.priKey = RSA.importKey(CertFactory.getPrivateKeyForAddr(addr))
+        certs = CertFactory.getCertsForAddr(addr)
+        self.myCertData = certs[0]
+        self.CACertData = certs[1]
         if self.__isClient:
             self.sendFHSPacket()
 
@@ -237,7 +241,7 @@ class RIProtocol(StackingProtocolMixin, Protocol):
         initialMsg.SeqNumNotiFlag = True
         initialMsg.SessionID = DEFAULT_CLIENT_SESSION
         initialMsg.Cert = [str(clientNonce), self.myCertData, self.CACertData]
-        initialMsg.Signature = buildSign(initialMsg.__serialize__())
+        initialMsg.Signature = self.buildSign(initialMsg.__serialize__())
         return initialMsg
 
     def onClose(self, sig, data):
@@ -374,7 +378,7 @@ class RIProtocol(StackingProtocolMixin, Protocol):
         msgToSend.AckNum = self.__ackNum
         msgToSend.AckFlag = True
         msgToSend.Cert = [self.serverNonce, intToNonce(int(msg.Cert[0], 16) + 1), self.myCertData, self.CACertData]
-        msgToSend.Signature = buildSign(msgToSend.__serialize__())
+        msgToSend.Signature = self.buildSign(msgToSend.__serialize__())
         return msgToSend
 
     def processHSSecond(self, msg):  # client
@@ -395,7 +399,7 @@ class RIProtocol(StackingProtocolMixin, Protocol):
         self.__ackNum = msg.SeqNum + 1
         msgToSend.AckNum = self.__ackNum
         msgToSend.AckFlag = True
-        msgToSend.Signature = buildSign(msgToSend.__serialize__())
+        msgToSend.Signature = self.buildSign(msgToSend.__serialize__())
         return msgToSend
 
     def processHSThird(self, msg):
@@ -418,7 +422,7 @@ class RIProtocol(StackingProtocolMixin, Protocol):
         self.__ackNum = msg.SeqNum + len(msg.Data)
         msgToSend.AckNum = self.__ackNum
         msgToSend.AckFlag = True
-        msgToSend.Signature = buildSign(msgToSend.__serialize__())
+        msgToSend.Signature = self.buildSign(msgToSend.__serialize__())
         return msgToSend
 
     def checkHSPacket(self, msg):
@@ -464,7 +468,7 @@ class RIProtocol(StackingProtocolMixin, Protocol):
         self.__ackNum = msg.SeqNum + len(msg.Data)
         msgToSend.AckNum = self.__ackNum
         msgToSend.AckFlag = True
-        msgToSend.Signature = buildSign(msgToSend.__serialize__())
+        msgToSend.Signature = self.buildSign(msgToSend.__serialize__())
         return msgToSend
 
     def closeConnection(self):
@@ -477,7 +481,7 @@ class RIProtocol(StackingProtocolMixin, Protocol):
         packet = MyMessage()
         packet.SeqNum = self.__initialSN
         packet.CloseFlag = True
-        packet.Signature = buildSign(packet.__serialize__())
+        packet.Signature = self.buildSign(packet.__serialize__())
         return packet
 
     def buildResetPacket(self):
@@ -488,7 +492,7 @@ class RIProtocol(StackingProtocolMixin, Protocol):
         if self.__isClient:
             msgToSend.SessionID = DEFAULT_CLIENT_SESSION
             msgToSend.Cert = [str(clientNonce), self.myCertData, self.CACertData]
-        msgToSend.Signature = buildSign(msgToSend.__serialize__())
+        msgToSend.Signature = self.buildSign(msgToSend.__serialize__())
         return msgToSend
 
     def authenticationFail(self):
@@ -509,6 +513,9 @@ class RIProtocol(StackingProtocolMixin, Protocol):
         if not checkSignature:
             log(errType.HANDSHAKE, "signature false")
         return checkSignature
+
+    def buildSign(self, data):
+        return PKCS1_v1_5.new(self.priKey).sign(SHA256.new(data))
 
 
 class MyServerFactory(StackingFactoryMixin, ServerFactory):
@@ -559,10 +566,6 @@ def checkCerts(cert1, cert2):
         log(errType.HANDSHAKE, 'root wrong')
         return False
     return True
-
-
-def buildSign(data):
-    return PKCS1_v1_5.new(priKey).sign(SHA256.new(data))
 
 
 def checkSign(key, data, signature):
