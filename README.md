@@ -1,7 +1,11 @@
 # README #
 ## update on Nov 5 ##
-force pushed and forgot to edit the readme
-Newly updated one, successfully passed all the tests.
+Force pushed and forgot to edit the readme.
+
+Newly updated one, successfully passed all the tests. Main file is "lab2stack.py", folder "keys", files "CertFactory.py", "MyTimer.py" are necessary, others are just used for test.
+
+File "MyTimer.py" is modified from "playground.network.comoon.Timer", which is created by Seth, the class teacher
+
 
 -------------------------------------------------------
 
