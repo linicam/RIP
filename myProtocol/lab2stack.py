@@ -247,7 +247,7 @@ class RIProtocol(StackingProtocolMixin, Protocol):
     def onClose(self, sig, data):
         if sig == signal.CLOSING:
             return
-        del self.__timer
+        # del self.__timer
         self.transport.loseConnection()
         self.higherTransport.realLoseConnection()
 
@@ -321,7 +321,7 @@ class RIProtocol(StackingProtocolMixin, Protocol):
                     return
                 self.sm.signal(signal.ACK_RECEIVED, msg)
             elif self.sm.currentState() == state.CLOSEREQ:
-                if msg.SeqNum == self.__peerISN:
+                if msg.AckNum == self.__initialSN + 1 or msg.CloseFlag:
                     self.sm.signal(signal.CLOSE_ACK, "")
                 else:
                     log(errType.TRANSMISSION,
@@ -331,8 +331,6 @@ class RIProtocol(StackingProtocolMixin, Protocol):
                 if msg.CloseFlag:
                     # log(errType.CHECK, 'recv close flag {0} | {1}'.format(
                     #     len(self.higherTransport.getDataBuf()), self.higherTransport.getTimer().started()))
-                    if len(self.higherTransport.getDataBuf()) or self.higherTransport.getTimer().started():
-                        callLater(1, self.processClose(), msg)
                     self.processClose(msg)
                 elif msg.AckFlag:  # recv ack
                     if msg.SeqNum == self.__peerISN - 1:  # recv hs2
@@ -465,14 +463,14 @@ class RIProtocol(StackingProtocolMixin, Protocol):
     def buildCloseAckPacket(self, msg):
         msgToSend = MyMessage()
         msgToSend.SeqNum = self.__initialSN + 1
-        self.__ackNum = msg.SeqNum + len(msg.Data)
+        self.__ackNum = msg.SeqNum + 1
         msgToSend.AckNum = self.__ackNum
         msgToSend.AckFlag = True
         msgToSend.Signature = self.buildSign(msgToSend.__serialize__())
         return msgToSend
 
     def closeConnection(self):
-        # log(errType.CHECK, '[CHECK] closing {0}'.format(self.__isClient))
+        # log(errType.CHECK, 'closing {0}'.format(self.__isClient))
         self.transport.write(self.buildClosePacket().__serialize__())
         self.sm.signal(signal.CLOSING, "")
         self.startTimer()
