@@ -220,7 +220,7 @@ class RIProtocol(StackingProtocolMixin, Protocol):
 
     def connectionMade(self):
         # log(errType.CHECK, self.__isClient + " connection made")
-        addr = self.transport.getPeer().host
+        addr = self.transport.getHost().host
         self.priKey = RSA.importKey(CertFactory.getPrivateKeyForAddr(addr))
         certs = CertFactory.getCertsForAddr(addr)
         self.myCertData = certs[0]
@@ -247,7 +247,7 @@ class RIProtocol(StackingProtocolMixin, Protocol):
     def onClose(self, sig, data):
         if sig == signal.CLOSING:
             return
-        # del self.__timer
+        self.stopTimer()
         self.transport.loseConnection()
         self.higherTransport.realLoseConnection()
 
@@ -263,7 +263,7 @@ class RIProtocol(StackingProtocolMixin, Protocol):
 
     def stopTimer(self):
         # log(errType.TIMER, 'stop')
-        self.__timer and self.__timer.cancel()
+        self.__timer.cancel()
 
     def reSendLastPacket(self):
         # log(errType.CHECK, 'resend')
@@ -279,11 +279,12 @@ class RIProtocol(StackingProtocolMixin, Protocol):
             self.__buffer = self.__buffer[byte:]
         for msg in self.__storage.iterateMessages():
             # after handshake phase 1, got clientPubKey, then authenticate
-            if (self.sm.currentState() != state.LISTENING and not self.__isClient) or (
-                            self.sm.currentState() != state.SNN_SENT and self.__isClient):
+            if (self.sm.currentState() != state.LISTENING and not self.__isClient) or \
+                    (self.sm.currentState() != state.SNN_SENT and self.__isClient):
                 if not self.checkSign(msg):
                     if self.sm.currentState() != state.ESTABLISHED:
                         self.authenticationFail()
+                        return
                 elif msg.ResetFlag:
                     # log(errType.CHECK, 'reset {0}'.format(self.__isClient))
                     if not msg.SeqNum == self.__peerISN - 1:
@@ -327,6 +328,8 @@ class RIProtocol(StackingProtocolMixin, Protocol):
                     log(errType.TRANSMISSION,
                         'seqnum error when close {0} | {1} | {2} | {3}'.format(
                             msg.SeqNum, self.__peerISN, msg.CloseFlag, len(msg.Data)))
+                    self.authenticationFail()
+                    return
             elif self.sm.currentState() == state.ESTABLISHED:
                 if msg.CloseFlag:
                     # log(errType.CHECK, 'recv close flag {0} | {1}'.format(
@@ -426,14 +429,14 @@ class RIProtocol(StackingProtocolMixin, Protocol):
     def checkHSPacket(self, msg):
         cert1 = X509Certificate.loadPEM(msg.Cert[2 if self.__isClient else 1])
         cert2 = X509Certificate.loadPEM(msg.Cert[3 if self.__isClient else 2])
-        peerPubKeyBlock = cert2.getPublicKeyBlob()
+        peerPubKeyBlock = cert1.getPublicKeyBlob()
         self.peerPubKey = RSA.importKey(peerPubKeyBlock)
         # 0. Check signature
         if not self.checkSign(msg):
             return False
         # 1.server do check IP
         if cert1.getSubject()["commonName"] != self.transport.getPeer().host:
-            self.log(errType.HANDSHAKE, "IP false")
+            log(errType.HANDSHAKE, "IP false")
             return False
         # 2, 3, 4: checkCerts
         res = checkCerts(cert1, cert2)
@@ -516,13 +519,16 @@ class RIProtocol(StackingProtocolMixin, Protocol):
         return PKCS1_v1_5.new(self.priKey).sign(SHA256.new(data))
 
 
+# ------------------------------------------------------------------
+# below is server
+
 class MyServerFactory(StackingFactoryMixin, ServerFactory):
     def buildProtocol(self, addr):
         return RIProtocol()
 
 
 # ------------------------------------------------------------------
-# below are client
+# below is client
 
 class MyClientFactory(StackingFactoryMixin, ClientFactory):
     def buildProtocol(self, addr):
