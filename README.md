@@ -2,6 +2,7 @@
 ## update on Nov 5 ##
 force pushed and forgot to edit the readme
 Newly updated one, successfully passed all the tests.
+File "MyTimer.py" is modified from "playground.network.comoon.Timer", which is created by Seth, the class teacher
 
 -------------------------------------------------------
 
