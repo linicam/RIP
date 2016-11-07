@@ -1,5 +1,11 @@
 # README #
+## update on Nov 5 ##
+force pushed and forgot to edit the readme
+Newly updated one, successfully passed all the tests.
 
+-------------------------------------------------------
+
+## update on Nov 1st ##
 This protocol implemented handshake and one-direction data flow from client to server, due to my misunderstanding of the protocol, I didn't implement the other direction of data flow. That's to say, client writes, and server sends ACK, if server wants to send back data, it should be included in the ACK packet, this is what my protocol does.
 
 So, score 50% at most, because I realized it just now and no enough time to modify the code.
