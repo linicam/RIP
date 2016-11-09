@@ -46,11 +46,6 @@ TIMEOUT = 0.5
 # HARD CODE HERE
 rootCertData = CertFactory.getRootCert()
 rootCert = X509Certificate.loadPEM(rootCertData)
-priKey = RSA.importKey(CertFactory.getPrivateKeyForAddr())
-
-clientNonce = os.urandom(8).encode('hex')  # random.randint(0, 65535)
-serverNonce = os.urandom(8).encode('hex')
-DEFAULT_CLIENT_SESSION = str(clientNonce) + str(serverNonce)
 
 connectionDone = failure.Failure(error.ConnectionDone())
 connectionDone.cleanFailure()
@@ -61,16 +56,16 @@ class MyMessage(MessageDefinition):
     MESSAGE_VERSION = "1.0"
 
     BODY = [
-        ("SeqNum", UINT4),
-        ("AckNum", UINT4, OPTIONAL),
-        ("Signature", STRING, DEFAULT_VALUE("")),
-        ("Cert", LIST(STRING), OPTIONAL),
-        ("AckFlag", BOOL1, DEFAULT_VALUE(False)),
-        ("SessionID", STRING, OPTIONAL),
-        ("CloseFlag", BOOL1, DEFAULT_VALUE(False)),
-        ("SeqNumNotiFlag", BOOL1, DEFAULT_VALUE(False)),
-        ("ResetFlag", BOOL1, DEFAULT_VALUE(False)),
-        ("Data", STRING, DEFAULT_VALUE("")),
+        ("sequence_number", UINT4),
+        ("acknowledgement_number", UINT4, OPTIONAL),
+        ("signature", STRING, DEFAULT_VALUE("")),
+        ("certificate", LIST(STRING), OPTIONAL),
+        ("acknowledgement_flag", BOOL1, DEFAULT_VALUE(False)),
+        ("sessionID", STRING, OPTIONAL),
+        ("close_flag", BOOL1, DEFAULT_VALUE(False)),
+        ("sequence_number_notification_flag", BOOL1, DEFAULT_VALUE(False)),
+        ("reset_flag", BOOL1, DEFAULT_VALUE(False)),
+        ("data", STRING, DEFAULT_VALUE("")),
         ("OPTIONS", LIST(STRING), OPTIONAL)
     ]
 
@@ -126,8 +121,8 @@ class RIPTransport(StackingTransport):
         # log(errType.TIMER, 'transport stop')
         self.__timer and self.__timer.cancel()
         if ackNum != self.__seqNum:
-            log(errType.CHECK, '{0} | {1} | {2}'.format(ackNum, self.__seqNum, self.__lastDataPacket.SeqNum))
-            if ackNum == self.__lastDataPacket.SeqNum:
+            # log(errType.CHECK, '{0} | {1} | {2}'.format(ackNum, self.__sequence_number, self.__lastDataPacket.sequence_number))
+            if ackNum == self.__lastDataPacket.sequence_number:
                 self.resendDataPacket()
                 return
         else:
@@ -152,9 +147,10 @@ class RIPTransport(StackingTransport):
 
     def buildDataPacket(self, data):
         packet = MyMessage()
-        packet.SeqNum = self.__seqNum
-        packet.Data = data
-        packet.Signature = buildSign(packet.__serialize__())
+        packet.sequence_number = self.__seqNum
+        packet.sessionID = self.__protocol.getSessionID()
+        packet.data = data
+        packet.signature = self.__protocol.buildSign(packet.__serialize__())
         return packet
 
     def loseConnection(self):
@@ -168,7 +164,7 @@ class RIPTransport(StackingTransport):
         super(RIPTransport, self).loseConnection()
 
     def resendDataPacket(self):
-        # log(errType.CHECK, self.__lastDataPacket.SeqNum, self.__protocol.isClient())
+        # log(errType.CHECK, self.__lastDataPacket.sequence_number, self.__protocol.isClient())
         self.lowerTransport().write(self.__lastDataPacket.__serialize__())
         self.startTimer()
 
@@ -180,6 +176,7 @@ class RIPTransport(StackingTransport):
 
 
 class RIProtocol(StackingProtocolMixin, Protocol):
+    __nonce = os.urandom(8).encode("hex")
     __initialSN = random.randint(0, pow(2, 32))
 
     def __init__(self, isClient=False):
@@ -188,9 +185,9 @@ class RIProtocol(StackingProtocolMixin, Protocol):
         self.__storage = MessageStorage()
         self.setupServerSM()
 
-        certs = CertFactory.getCertsForAddr()
-        self.myCertData = certs[0]
-        self.CACertData = certs[1]
+        self.priKey = ""
+        self.myCertData = ""
+        self.CACertData = ""
 
         self.__buffer = ""  # for data received
         self.__lastPacket = MyMessage()  # the last sent packet used when reset flag is true
@@ -215,12 +212,17 @@ class RIProtocol(StackingProtocolMixin, Protocol):
         self.sm.start(state.LISTENING)
 
     def onEstablished(self, sig, data):
-        # log(errType.CHECK, self.__isClient + " established")
+        # log(errType.CHECK, '{0} established'.format(self.__isClient))
         self.higherTransport = RIPTransport(self.transport, self.__initialSN + 1, self)
         self.makeHigherConnection(self.higherTransport)
 
     def connectionMade(self):
         # log(errType.CHECK, self.__isClient + " connection made")
+        addr = self.transport.getHost().host
+        self.priKey = RSA.importKey(CertFactory.getPrivateKeyForAddr(addr))
+        certs = CertFactory.getCertsForAddr(addr)
+        self.myCertData = certs[0]
+        self.CACertData = certs[1]
         if self.__isClient:
             self.sendFHSPacket()
 
@@ -233,17 +235,17 @@ class RIProtocol(StackingProtocolMixin, Protocol):
 
     def buildFHSPacket(self):
         initialMsg = MyMessage()
-        initialMsg.SeqNum = self.__initialSN
-        initialMsg.SeqNumNotiFlag = True
-        initialMsg.SessionID = DEFAULT_CLIENT_SESSION
-        initialMsg.Cert = [str(clientNonce), self.myCertData, self.CACertData]
-        initialMsg.Signature = buildSign(initialMsg.__serialize__())
+        initialMsg.sequence_number = self.__initialSN
+        initialMsg.sequence_number_notification_flag = True
+        # initialMsg.sessionID = DEFAULT_CLIENT_SESSION
+        initialMsg.certificate = [str(self.__nonce), self.myCertData, self.CACertData]
+        initialMsg.signature = self.buildSign(initialMsg.__serialize__())
         return initialMsg
 
     def onClose(self, sig, data):
         if sig == signal.CLOSING:
             return
-        del self.__timer
+        self.stopTimer()
         self.transport.loseConnection()
         self.higherTransport.realLoseConnection()
 
@@ -259,7 +261,7 @@ class RIProtocol(StackingProtocolMixin, Protocol):
 
     def stopTimer(self):
         # log(errType.TIMER, 'stop')
-        self.__timer and self.__timer.cancel()
+        self.__timer.cancel()
 
     def reSendLastPacket(self):
         # log(errType.CHECK, 'resend')
@@ -275,14 +277,15 @@ class RIProtocol(StackingProtocolMixin, Protocol):
             self.__buffer = self.__buffer[byte:]
         for msg in self.__storage.iterateMessages():
             # after handshake phase 1, got clientPubKey, then authenticate
-            if (self.sm.currentState() != state.LISTENING and not self.__isClient) or (
-                            self.sm.currentState() != state.SNN_SENT and self.__isClient):
+            if (self.sm.currentState() != state.LISTENING and not self.__isClient) or \
+                    (self.sm.currentState() != state.SNN_SENT and self.__isClient):
                 if not self.checkSign(msg):
                     if self.sm.currentState() != state.ESTABLISHED:
                         self.authenticationFail()
-                elif msg.ResetFlag:
-                    # print "[RESET]", self.__isClient
-                    if not msg.SeqNum == self.__peerISN - 1:
+                        return
+                elif msg.reset_flag:
+                    # log(errType.CHECK, 'reset {0}'.format(self.__isClient))
+                    if not msg.sequence_number == self.__peerISN - 1:
                         continue
                     self.initialize()
                     if self.__isClient:  # client
@@ -304,52 +307,55 @@ class RIProtocol(StackingProtocolMixin, Protocol):
                     return
                 self.sm.signal(signal.ACK_RECEIVED, msg)
             elif self.sm.currentState() == state.SNN_RECV:  # handshake phase 3
-                if msg.SeqNum != self.__ackNum:
-                    log(errType.TRANSMISSION, "seq num false")
-                    continue
-                if not msg.AckFlag:
-                    log(errType.CHECK, '3rd hs lost')
+                if not msg.acknowledgement_flag:
+                    log(errType.HANDSHAKE, '3rd hs lost' + msg.data)
                     self.transport.write(self.__lastPacket.__serialize__())
                     self.startTimer()
                     return
+                if msg.sequence_number != self.__ackNum:
+                    log(errType.TRANSMISSION, "seq num false ")
+                    continue
                 if not self.processHSThird(msg):
                     self.authenticationFail()
                     return
                 self.sm.signal(signal.ACK_RECEIVED, msg)
             elif self.sm.currentState() == state.CLOSEREQ:
-                if msg.SeqNum == self.__peerISN:
-                    self.sm.signal(signal.CLOSE_ACK, "")
-                else:
-                    log(errType.TRANSMISSION,
-                        'seqnum error when close {0} | {1} | {2} | {3}'.format(
-                            str(msg.SeqNum), str(self.__peerISN), str(msg.CloseFlag), str(len(msg.Data))))
+                if self.checkSessionID(msg):
+                    if msg.acknowledgement_number == self.__initialSN + 1 or msg.close_flag:
+                        self.sm.signal(signal.CLOSE_ACK, "")
+                    else:
+                        log(errType.TRANSMISSION,
+                            'seqnum error when close {0} | {1} | {2} | {3}'.format(
+                                msg.sequence_number, self.__peerISN, msg.close_flag, len(msg.data)))
+                        self.authenticationFail()
+                        return
             elif self.sm.currentState() == state.ESTABLISHED:
-                if msg.CloseFlag:
-                    log(errType.CHECK, 'recv close flag ' + str(len(self.higherTransport.getDataBuf())) + " | " +
-                        str(self.higherTransport.getTimer().started()))
-                    if len(self.higherTransport.getDataBuf()) or self.higherTransport.getTimer().started():
-                        callLater(1, self.processClose(), msg)
-                    self.processClose(msg)
-                elif msg.AckFlag:  # recv ack
-                    if msg.Cert:
-                        self.transport.write(self.__lastPacket.__serialize__())
-                    # log(errType.CHECK, 'recv ack flag')
-                    self.higherTransport.stopTimer(msg.AckNum)
-                else:  # recv data
-                    if msg.SeqNum != self.__ackNum:
-                        log(errType.CHECK,
-                            '{0} | {1} | {2} | {3} | {4}'.format(str(len(msg.Data)), str(self.__isClient),
-                                                                 str(msg.SeqNum), str(self.__ackNum),
-                                                                 str(self.__oneBeforeLastAck)))
-                        if msg.SeqNum == self.__oneBeforeLastAck:
-                            self.reSendLastPacket()
-                            return
-                        log(errType.TRANSMISSION, "seq num false")
-                        continue
-                    self.processData(msg)
+                if self.checkSessionID(msg):
+                    if msg.close_flag:
+                        # log(errType.CHECK, 'recv close flag {0} | {1}'.format(
+                        #     len(self.higherTransport.getDataBuf()), self.higherTransport.getTimer().started()))
+                        self.processClose(msg)
+                    elif msg.acknowledgement_flag:  # recv ack
+                        if msg.sequence_number == self.__peerISN - 1:  # recv hs2
+                            # log(errType.HANDSHAKE, 'recv 2nd hs when established')
+                            self.transport.write(self.__lastPacket.__serialize__())
+                        # log(errType.CHECK, 'recv ack flag')
+                        self.higherTransport.stopTimer(msg.acknowledgement_number)
+                    else:  # recv data
+                        if msg.sequence_number != self.__ackNum:
+                            # log(errType.CHECK, '{0} | {1} | {2} | {3} | {4}'.format(
+                            #     str(len(msg.data)), str(self.__isClient),
+                            #     str(msg.sequence_number), str(self.__ackNum),
+                            #     str(self.__oneBeforeLastAck)))
+                            if msg.sequence_number == self.__oneBeforeLastAck:
+                                self.reSendLastPacket()
+                                return
+                            log(errType.TRANSMISSION, "seq num false")
+                            continue
+                        self.processData(msg)
 
     def processClose(self, msg):
-        if msg.SeqNum == self.__peerISN - 1:
+        if msg.sequence_number == self.__peerISN - 1:
             self.sm.signal(signal.CLOSE_REQ, msg)
             self.transport.write(self.buildCloseAckPacket(msg).__serialize__())
             self.sm.signal(signal.CLOSE, msg)
@@ -357,7 +363,7 @@ class RIProtocol(StackingProtocolMixin, Protocol):
     def processHSFirst(self, msg):  # server
         if not self.checkHSPacket(msg):
             return False
-        self.__peerISN = msg.SeqNum + 1
+        self.__peerISN = msg.sequence_number + 1
         msgToSend = self.sendSHSPacket(msg)
         self.transport.write(msgToSend.__serialize__())
         self.__lastPacket = msgToSend
@@ -367,19 +373,18 @@ class RIProtocol(StackingProtocolMixin, Protocol):
 
     def sendSHSPacket(self, msg):  # server
         msgToSend = MyMessage()
-        msgToSend.SeqNum = self.__initialSN
-        msgToSend.SessionID = msg.SessionID[len(msg.Cert[0]):] + msg.SessionID[:len(msg.Cert[0])]
-        self.__ackNum = msg.SeqNum + 1
-        msgToSend.AckNum = self.__ackNum
-        msgToSend.AckFlag = True
-        msgToSend.Cert = [self.serverNonce, intToNonce(int(msg.Cert[0], 16) + 1), self.myCertData, self.CACertData]
-        msgToSend.Signature = buildSign(msgToSend.__serialize__())
+        msgToSend.sequence_number = self.__initialSN
+        self.__ackNum = msg.sequence_number + 1
+        msgToSend.acknowledgement_number = self.__ackNum
+        msgToSend.acknowledgement_flag = True
+        msgToSend.certificate = [self.__nonce, intToNonce(int(msg.certificate[0], 16) + 1), self.myCertData, self.CACertData]
+        msgToSend.signature = self.buildSign(msgToSend.__serialize__())
         return msgToSend
 
     def processHSSecond(self, msg):  # client
         if not self.checkHSPacket(msg):
             return False
-        self.__peerISN = msg.SeqNum + 1
+        self.__peerISN = msg.sequence_number + 1
         msgToSend = self.sendTHSPacket(msg)
         self.transport.write(msgToSend.__serialize__())  # try to transport my msg
         self.__lastPacket = msgToSend
@@ -388,106 +393,105 @@ class RIProtocol(StackingProtocolMixin, Protocol):
 
     def sendTHSPacket(self, msg):
         msgToSend = MyMessage()
-        msgToSend.Cert = [intToNonce(int(msg.Cert[0], 16) + 1)]
-        msgToSend.SeqNum = self.__initialSN + 1
-        msgToSend.SessionID = DEFAULT_CLIENT_SESSION
-        self.__ackNum = msg.SeqNum + 1
-        msgToSend.AckNum = self.__ackNum
-        msgToSend.AckFlag = True
-        msgToSend.Signature = buildSign(msgToSend.__serialize__())
+        msgToSend.certificate = [intToNonce(int(msg.certificate[0], 16) + 1)]
+        msgToSend.sequence_number = self.__initialSN + 1
+        msgToSend.sessionID = self.sessionID
+        self.__ackNum = msg.sequence_number + 1
+        msgToSend.acknowledgement_number = self.__ackNum
+        msgToSend.acknowledgement_flag = True
+        msgToSend.signature = self.buildSign(msgToSend.__serialize__())
         return msgToSend
 
     def processHSThird(self, msg):
         if not self.checkTHSPacket(msg):
             return False
         # no need to add ACK or nextSEQ
-        # self.__ackNum = msg.SeqNum + (len(msg.Data) or 1)
+        # self.__ackNum = msg.sequence_number + (len(msg.data) or 1)
         return True
 
     def processData(self, msg):
-        self.__oneBeforeLastAck = msg.SeqNum
+        self.__oneBeforeLastAck = msg.sequence_number
         packetToSent = self.buildAckPacket(msg)
         self.transport.write(packetToSent.__serialize__())
         self.__lastPacket = packetToSent
-        self.higherProtocol() and self.higherProtocol().dataReceived(msg.Data)
+        self.higherProtocol() and self.higherProtocol().dataReceived(msg.data)
 
     def buildAckPacket(self, msg):
         msgToSend = MyMessage()
-        msgToSend.SeqNum = self.__initialSN + 1
-        self.__ackNum = msg.SeqNum + len(msg.Data)
-        msgToSend.AckNum = self.__ackNum
-        msgToSend.AckFlag = True
-        msgToSend.Signature = buildSign(msgToSend.__serialize__())
+        msgToSend.sequence_number = self.__initialSN + 1
+        msgToSend.sessionID = self.sessionID
+        self.__ackNum = msg.sequence_number + len(msg.data)
+        msgToSend.acknowledgement_number = self.__ackNum
+        msgToSend.acknowledgement_flag = True
+        msgToSend.signature = self.buildSign(msgToSend.__serialize__())
         return msgToSend
 
     def checkHSPacket(self, msg):
-        cert1 = X509Certificate.loadPEM(msg.Cert[2 if self.__isClient else 1])
-        cert2 = X509Certificate.loadPEM(msg.Cert[3 if self.__isClient else 2])
-        peerPubKeyBlock = cert2.getPublicKeyBlob()
+        cert1 = X509Certificate.loadPEM(msg.certificate[2 if self.__isClient else 1])
+        cert2 = X509Certificate.loadPEM(msg.certificate[3 if self.__isClient else 2])
+        peerPubKeyBlock = cert1.getPublicKeyBlob()
         self.peerPubKey = RSA.importKey(peerPubKeyBlock)
         # 0. Check signature
         if not self.checkSign(msg):
             return False
         # 1.server do check IP
-        # if cert1.getSubject()["commonName"] != self.transport.getPeer().host:
-        #     self.log(errType.HANDSHAKE, "IP false")
-        #     return False
+        if cert1.getSubject()["commonName"] != self.transport.getPeer().host:
+            log(errType.HANDSHAKE, "IP false")
+            return False
         # 2, 3, 4: checkCerts
         res = checkCerts(cert1, cert2)
         if not res:
             log(errType.HANDSHAKE, "checkCerts false")
             return False
-        if self.__isClient:
-            # 5.public key check the signature of nonce1
-            checkSignature = intToNonce(int(clientNonce, 16) + 1) == msg.Cert[1]
-            if not checkSignature:
-                log(errType.HANDSHAKE, "wrong nonce1")
-                return False
-        else:
-            # get server's nonce
-            if msg.SessionID[:len(msg.Cert[0])] != msg.Cert[0]:
-                log(errType.HANDSHAKE, "wrong client nonce")
-                return False
-            self.serverNonce = msg.SessionID[len(msg.Cert[0]):]
+        # 5: check nonce
+        if self.__isClient and not intToNonce(int(self.__nonce, 16) + 1) == msg.certificate[1]:
+            log(errType.HANDSHAKE, "wrong nonc1")
+            return False
+        self.sessionID = str(self.__nonce) + str(msg.certificate[0])
+        self.peerSessionID = str(msg.certificate[0]) + str(self.__nonce)
         return True
 
     def checkTHSPacket(self, msg):
-        if not intToNonce(int(self.serverNonce, 16) + 1) == msg.Cert[0]:
-            log(errType.HANDSHAKE, "wrong signature")
+        if self.peerSessionID != msg.sessionID:
+            log(errType.HANDSHAKE, "wrong seesion ID")
+            return False
+        if not intToNonce(int(self.__nonce, 16) + 1) == msg.certificate[0]:
+            log(errType.HANDSHAKE, "wrong nonce")
             return False
         return True
 
     def buildCloseAckPacket(self, msg):
         msgToSend = MyMessage()
-        msgToSend.SeqNum = self.__initialSN + 1
-        self.__ackNum = msg.SeqNum + len(msg.Data)
-        msgToSend.AckNum = self.__ackNum
-        msgToSend.AckFlag = True
-        msgToSend.Signature = buildSign(msgToSend.__serialize__())
+        msgToSend.sequence_number = self.__initialSN + 1
+        msgToSend.sessionID = self.sessionID
+        self.__ackNum = msg.sequence_number + 1
+        msgToSend.acknowledgement_number = self.__ackNum
+        msgToSend.acknowledgement_flag = True
+        msgToSend.signature = self.buildSign(msgToSend.__serialize__())
         return msgToSend
 
     def closeConnection(self):
-        print "[CHECK] closing", self.__isClient
+        # log(errType.CHECK, 'closing {0}'.format(self.__isClient))
         self.transport.write(self.buildClosePacket().__serialize__())
         self.sm.signal(signal.CLOSING, "")
         self.startTimer()
 
     def buildClosePacket(self):
         packet = MyMessage()
-        packet.SeqNum = self.__initialSN
-        packet.CloseFlag = True
-        packet.Signature = buildSign(packet.__serialize__())
+        packet.sequence_number = self.__initialSN
+        packet.sessionID = self.sessionID
+        packet.close_flag = True
+        packet.signature = self.buildSign(packet.__serialize__())
         return packet
 
     def buildResetPacket(self):
         msgToSend = MyMessage()
-        msgToSend.SeqNum = self.__initialSN
-        msgToSend.SeqNumNotiFlag = True
-        msgToSend.ResetFlag = True
+        msgToSend.sequence_number = self.__initialSN
+        msgToSend.sequence_number_notification_flag = True
+        msgToSend.reset_flag = True
         if self.__isClient:
-            msgToSend.SessionID = DEFAULT_CLIENT_SESSION
-            msgToSend.Cert = [str(clientNonce), self.myCertData, self.CACertData]
-        msgToSend.Signature = buildSign(msgToSend.__serialize__())
+            msgToSend.certificate = [str(self.__nonce), self.myCertData, self.CACertData]
+        msgToSend.signature = self.buildSign(msgToSend.__serialize__())
         return msgToSend
 
     def authenticationFail(self):
@@ -503,12 +507,28 @@ class RIProtocol(StackingProtocolMixin, Protocol):
         self.__lastPacket = ""
         self.__buffer = ""
 
+    def checkSessionID(self, msg):
+        if msg.sessionID != self.peerSessionID:
+            log(errType.CHECK, '{0} | {1} | {2}'.format(self.__nonce, self.peerSessionID, msg.sessionID))
+            log(errType.TRANSMISSION, "false session ID")
+            return False
+        return True
+
     def checkSign(self, msg):
         checkSignature = checkPacketSign(self.peerPubKey, msg)
         if not checkSignature:
             log(errType.HANDSHAKE, "signature false")
         return checkSignature
 
+    def buildSign(self, data):
+        return PKCS1_v1_5.new(self.priKey).sign(SHA256.new(data))
+
+    def getSessionID(self):
+        return self.sessionID
+
+
+# ------------------------------------------------------------------
+# below is server
 
 class MyServerFactory(StackingFactoryMixin, ServerFactory):
     def buildProtocol(self, addr):
@@ -516,7 +536,7 @@ class MyServerFactory(StackingFactoryMixin, ServerFactory):
 
 
 # ------------------------------------------------------------------
-# below are client
+# below is client
 
 class MyClientFactory(StackingFactoryMixin, ClientFactory):
     def buildProtocol(self, addr):
@@ -560,17 +580,13 @@ def checkCerts(cert1, cert2):
     return True
 
 
-def buildSign(data):
-    return PKCS1_v1_5.new(priKey).sign(SHA256.new(data))
-
-
 def checkSign(key, data, signature):
     return PKCS1_v1_5.new(key).verify(SHA256.new(data), signature)
 
 
 def checkPacketSign(key, packet):
-    sign = packet.Signature
-    packet.Signature = ""
+    sign = packet.signature
+    packet.signature = ""
     return checkSign(key, packet.__serialize__(), sign)
 
 
