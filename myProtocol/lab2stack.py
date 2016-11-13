@@ -284,15 +284,17 @@ class RIProtocol(StackingProtocolMixin, Protocol):
             self.__storage.update(self.__buffer[:byte])
             self.__buffer = self.__buffer[byte:]
         for msg in self.__storage.iterateMessages():
-            log(errType.CHECK, "received " + str(msg.sequence_number))
+            log(errType.CHECK, "received " + str(msg.sequence_number) + self.sm.currentState())
             # after handshake phase 1, got clientPubKey, then authenticate
             if (self.sm.currentState() != state.LISTENING and not self.__isClient) or \
                     (self.sm.currentState() != state.SNN_SENT and self.__isClient):
                 if not self.checkSign(msg):
+                    print 'CP1'
                     if self.sm.currentState() != state.ESTABLISHED:
                         self.authenticationFail()
                         return
                 elif msg.reset_flag:
+                    print 'CP2'
                     # log(errType.CHECK, 'reset {0}'.format(self.__isClient))
                     if not msg.sequence_number == self.__peerISN - 1:
                         continue
@@ -329,6 +331,7 @@ class RIProtocol(StackingProtocolMixin, Protocol):
                     return
                 self.sm.signal(signal.ACK_RECEIVED, msg)
             elif self.sm.currentState() == state.CLOSEREQ:
+                print 'CP3'
                 if self.checkSessionID(msg):
                     if msg.acknowledgement_number == self.__ackNum or msg.close_flag:
                         log(errType.CHECK, "start close")
@@ -340,6 +343,7 @@ class RIProtocol(StackingProtocolMixin, Protocol):
                         self.authenticationFail()
                         return
             elif self.sm.currentState() == state.ESTABLISHED:
+                print 'CP4'
                 if self.checkSessionID(msg):
                     if msg.close_flag:
                         # log(errType.CHECK, 'recv close flag {0} | {1}'.format(
