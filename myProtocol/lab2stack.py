@@ -52,7 +52,7 @@ connectionDone.cleanFailure()
 
 
 class MyMessage(MessageDefinition):
-    PLAYGROUND_IDENTIFIER = "myProtocol.MyProtocolStack.MyMessage"
+    PLAYGROUND_IDENTIFIER = "RIP.RIPMessageID"
     MESSAGE_VERSION = "1.0"
 
     BODY = [
@@ -60,8 +60,9 @@ class MyMessage(MessageDefinition):
         ("acknowledgement_number", UINT4, OPTIONAL),
         ("signature", STRING, DEFAULT_VALUE("")),
         ("certificate", LIST(STRING), OPTIONAL),
+        ("sessionID", STRING),
         ("acknowledgement_flag", BOOL1, DEFAULT_VALUE(False)),
-        ("sessionID", STRING, OPTIONAL),
+        #  ("sessionID", STRING),
         ("close_flag", BOOL1, DEFAULT_VALUE(False)),
         ("sequence_number_notification_flag", BOOL1, DEFAULT_VALUE(False)),
         ("reset_flag", BOOL1, DEFAULT_VALUE(False)),
@@ -217,7 +218,7 @@ class RIProtocol(StackingProtocolMixin, Protocol):
         self.makeHigherConnection(self.higherTransport)
 
     def connectionMade(self):
-        # log(errType.CHECK, self.__isClient + " connection made")
+        log(errType.CHECK, str(self.__isClient) + " connection made")
         addr = self.transport.getHost().host
         self.priKey = RSA.importKey(CertFactory.getPrivateKeyForAddr(addr))
         certs = CertFactory.getCertsForAddr(addr)
@@ -225,6 +226,7 @@ class RIProtocol(StackingProtocolMixin, Protocol):
         self.CACertData = certs[1]
         if self.__isClient:
             self.sendFHSPacket()
+            log(errType.CHECK, "fist packet sent")
 
     def sendFHSPacket(self):
         msgToSend = self.buildFHSPacket()
@@ -238,6 +240,7 @@ class RIProtocol(StackingProtocolMixin, Protocol):
         initialMsg.sequence_number = self.__initialSN
         initialMsg.sequence_number_notification_flag = True
         initialMsg.certificate = [str(self.__nonce), self.myCertData, self.CACertData]
+        initialMsg.sessionID = ""
         initialMsg.signature = self.buildSign(initialMsg.__serialize__())
         return initialMsg
 
@@ -271,6 +274,7 @@ class RIProtocol(StackingProtocolMixin, Protocol):
         self.stopTimer()
         self.__buffer += data
         while self.__buffer:
+            log(errType.CHECK, str(len(self.__buffer))) 
             msg, byte = MyMessage.Deserialize(self.__buffer)
             self.__storage.update(self.__buffer[:byte])
             self.__buffer = self.__buffer[byte:]
@@ -376,6 +380,9 @@ class RIProtocol(StackingProtocolMixin, Protocol):
         self.__ackNum = msg.sequence_number + 1
         msgToSend.acknowledgement_number = self.__ackNum
         msgToSend.acknowledgement_flag = True
+        msgToSend.sequence_number_notification_flag = True
+        
+        msgToSend.sessionID = "" 
         msgToSend.certificate = [self.__nonce, intToNonce(int(msg.certificate[0], 16) + 1), self.myCertData, self.CACertData]
         msgToSend.signature = self.buildSign(msgToSend.__serialize__())
         return msgToSend
@@ -451,9 +458,9 @@ class RIProtocol(StackingProtocolMixin, Protocol):
         return True
 
     def checkTHSPacket(self, msg):
-        if self.peerSessionID != msg.sessionID:
-            log(errType.HANDSHAKE, "wrong seesion ID")
-            return False
+        # if self.peerSessionID != msg.sessionID:
+            # log(errType.HANDSHAKE, "wrong seesion ID")
+            # return False
         if not intToNonce(int(self.__nonce, 16) + 1) == msg.certificate[0]:
             log(errType.HANDSHAKE, "wrong nonce")
             return False
