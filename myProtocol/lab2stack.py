@@ -289,12 +289,10 @@ class RIProtocol(StackingProtocolMixin, Protocol):
             if (self.sm.currentState() != state.LISTENING and not self.__isClient) or \
                     (self.sm.currentState() != state.SNN_SENT and self.__isClient):
                 if not self.checkSign(msg):
-                    print 'CP1'
                     if self.sm.currentState() != state.ESTABLISHED:
                         self.authenticationFail()
                         return
                 elif msg.reset_flag:
-                    print 'CP2'
                     # log(errType.CHECK, 'reset {0}'.format(self.__isClient))
                     if not msg.sequence_number == self.__peerISN - 1:
                         continue
@@ -346,6 +344,7 @@ class RIProtocol(StackingProtocolMixin, Protocol):
                 print 'CP4'
                 if self.checkSessionID(msg):
                     if msg.close_flag:
+                        print 'CP5'
                         # log(errType.CHECK, 'recv close flag {0} | {1}'.format(
                         #     len(self.higherTransport.getDataBuf()), self.higherTransport.getTimer().started()))
                         self.processClose(msg)
@@ -369,10 +368,12 @@ class RIProtocol(StackingProtocolMixin, Protocol):
                         self.processData(msg)
 
     def processClose(self, msg):
-        if msg.sequence_number == self.__peerISN - 1:
+        if msg.sequence_number == self.__ackNum:
             self.sm.signal(signal.CLOSE_REQ, msg)
             self.transport.write(self.buildCloseAckPacket(msg).__serialize__())
             self.sm.signal(signal.CLOSE, msg)
+        else:
+            log(errType.TRANSMISSION, 'close packet wrong sequence number: {0}'.format(msg.sequence_number))
 
     def processHSFirst(self, msg):  # server
         if not self.checkHSPacket(msg):
