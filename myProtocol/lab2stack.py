@@ -250,11 +250,13 @@ class RIProtocol(StackingProtocolMixin, Protocol):
     def onClose(self, sig, data):
         if sig == signal.CLOSING:
             return
+        log(errType.CHECK, 'CLOSED')
         self.stopTimer()
         self.transport.loseConnection()
         self.higherTransport.realLoseConnection()
 
     def connectionLost(self, reason=connectionDone):
+        log(errType.CHECK, 'connection lost')
         Protocol.connectionLost(self, reason=reason)
         self.higherProtocol().connectionLost(reason)
         self.higherProtocol().transport = None
@@ -277,7 +279,6 @@ class RIProtocol(StackingProtocolMixin, Protocol):
         self.stopTimer()
         self.__buffer += data
         while self.__buffer:
-            log(errType.CHECK, str(len(self.__buffer))) 
             msg, byte = MyMessage.Deserialize(self.__buffer)
             self.__storage.update(self.__buffer[:byte])
             self.__buffer = self.__buffer[byte:]
