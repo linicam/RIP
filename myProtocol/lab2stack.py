@@ -109,7 +109,7 @@ class RIPTransport(StackingTransport):
     __lastDataPacket = MyMessage()
 
     def __init__(self, lowerTransport, initSeqNum, protocol):
-        self.__seqNum = initSeqNum
+        self.__seqNum = initSeqNum + 1
         self.__protocol = protocol
         self.__timer = MyTimer(self.resendDataPacket)
         StackingTransport.__init__(self, lowerTransport)
@@ -159,7 +159,7 @@ class RIPTransport(StackingTransport):
         if len(self.__dataBuf) or self.__timer.started():
             callLater(1, self.loseConnection)
         else:
-            self.__protocol.closeConnection()
+            self.__protocol.closeConnection(self.__seqNum)
 
     def realLoseConnection(self):
         super(RIPTransport, self).loseConnection()
@@ -324,7 +324,7 @@ class RIProtocol(StackingProtocolMixin, Protocol):
                 self.sm.signal(signal.ACK_RECEIVED, msg)
             elif self.sm.currentState() == state.CLOSEREQ:
                 if self.checkSessionID(msg):
-                    if msg.acknowledgement_number == self.__initialSN + 1 or msg.close_flag:
+                    if msg.acknowledgement_number == self.__ackNum or msg.close_flag:
                         self.sm.signal(signal.CLOSE_ACK, "")
                     else:
                         log(errType.TRANSMISSION,
@@ -411,8 +411,7 @@ class RIProtocol(StackingProtocolMixin, Protocol):
     def processHSThird(self, msg):
         if not self.checkTHSPacket(msg):
             return False
-        # no need to add ACK or nextSEQ
-        # self.__ackNum = msg.sequence_number + (len(msg.data) or 1)
+        self.__ackNum = msg.sequence_number + 1
         return True
 
     def processData(self, msg):
@@ -468,7 +467,7 @@ class RIProtocol(StackingProtocolMixin, Protocol):
 
     def buildCloseAckPacket(self, msg):
         msgToSend = MyMessage()
-        msgToSend.sequence_number = self.__initialSN + 1
+        msgToSend.sequence_number = msg.sequence_number + 1
         msgToSend.sessionID = self.sessionID
         self.__ackNum = msg.sequence_number + 1
         msgToSend.acknowledgement_number = self.__ackNum
@@ -476,15 +475,16 @@ class RIProtocol(StackingProtocolMixin, Protocol):
         msgToSend.signature = self.buildSign(msgToSend.__serialize__())
         return msgToSend
 
-    def closeConnection(self):
+    def closeConnection(self, closeSeqNum):
         # log(errType.CHECK, 'closing {0}'.format(self.__isClient))
-        self.transport.write(self.buildClosePacket().__serialize__())
+        self.transport.write(self.buildClosePacket(closeSeqNum).__serialize__())
         self.sm.signal(signal.CLOSING, "")
         self.startTimer()
 
-    def buildClosePacket(self):
+    def buildClosePacket(self, seqNum):
         packet = MyMessage()
-        packet.sequence_number = self.__initialSN
+        packet.sequence_number = seqNum
+        self.__ackNum == seqNum + 1
         packet.sessionID = self.sessionID
         packet.close_flag = True
         packet.signature = self.buildSign(packet.__serialize__())
