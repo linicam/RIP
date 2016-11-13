@@ -109,8 +109,8 @@ class RIPTransport(StackingTransport):
     __lastDataPacket = MyMessage()
 
     def __init__(self, lowerTransport, initSeqNum, protocol):
-        self.__seqNum = initSeqNum + 1
         self.__protocol = protocol
+        self.__seqNum = initSeqNum + 1 if self.__protocol.isClient() else initSeqNum
         self.__timer = MyTimer(self.resendDataPacket)
         StackingTransport.__init__(self, lowerTransport)
 
@@ -174,6 +174,9 @@ class RIPTransport(StackingTransport):
 
     def getTimer(self):
         return self.__timer
+
+    def getSeqNum(self):
+        return self.__seqNum
 
 
 class RIProtocol(StackingProtocolMixin, Protocol):
@@ -423,7 +426,7 @@ class RIProtocol(StackingProtocolMixin, Protocol):
 
     def buildAckPacket(self, msg):
         msgToSend = MyMessage()
-        msgToSend.sequence_number = self.__initialSN + 1
+        msgToSend.sequence_number = self.higherTransport.getSeqNum()
         msgToSend.sessionID = self.sessionID
         self.__ackNum = msg.sequence_number + len(msg.data)
         msgToSend.acknowledgement_number = self.__ackNum
@@ -467,7 +470,7 @@ class RIProtocol(StackingProtocolMixin, Protocol):
 
     def buildCloseAckPacket(self, msg):
         msgToSend = MyMessage()
-        msgToSend.sequence_number = msg.sequence_number + 1
+        msgToSend.sequence_number = self.higherTransport.getSeqNum()
         msgToSend.sessionID = self.sessionID
         self.__ackNum = msg.sequence_number + 1
         msgToSend.acknowledgement_number = self.__ackNum
@@ -531,6 +534,9 @@ class RIProtocol(StackingProtocolMixin, Protocol):
 
     def getSessionID(self):
         return self.sessionID
+
+    def isClient(self):
+        return self.__isClient
 
 
 # ------------------------------------------------------------------
