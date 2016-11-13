@@ -229,7 +229,6 @@ class RIProtocol(StackingProtocolMixin, Protocol):
         self.CACertData = certs[1]
         if self.__isClient:
             self.sendFHSPacket()
-            log(errType.CHECK, "fist packet sent")
 
     def sendFHSPacket(self):
         msgToSend = self.buildFHSPacket()
@@ -250,7 +249,6 @@ class RIProtocol(StackingProtocolMixin, Protocol):
     def onClose(self, sig, data):
         if sig == signal.CLOSING:
             return
-        log(errType.CHECK, 'CLOSED')
         self.stopTimer()
         self.transport.loseConnection()
         self.higherTransport.realLoseConnection()
@@ -276,7 +274,6 @@ class RIProtocol(StackingProtocolMixin, Protocol):
         self.startTimer()
 
     def dataReceived(self, data):
-        log(errType.CHECK, "received" + str(len(data)))
         self.stopTimer()
         self.__buffer += data
         while self.__buffer:
@@ -284,7 +281,6 @@ class RIProtocol(StackingProtocolMixin, Protocol):
             self.__storage.update(self.__buffer[:byte])
             self.__buffer = self.__buffer[byte:]
         for msg in self.__storage.iterateMessages():
-            log(errType.CHECK, "received " + str(msg.sequence_number) + self.sm.currentState())
             # after handshake phase 1, got clientPubKey, then authenticate
             if (self.sm.currentState() != state.LISTENING and not self.__isClient) or \
                     (self.sm.currentState() != state.SNN_SENT and self.__isClient):
@@ -329,10 +325,8 @@ class RIProtocol(StackingProtocolMixin, Protocol):
                     return
                 self.sm.signal(signal.ACK_RECEIVED, msg)
             elif self.sm.currentState() == state.CLOSEREQ:
-                print 'CP3'
                 if self.checkSessionID(msg):
                     if msg.acknowledgement_number == self.__ackNum or msg.close_flag:
-                        log(errType.CHECK, "start close")
                         self.sm.signal(signal.CLOSE_ACK, "")
                     else:
                         log(errType.TRANSMISSION,
@@ -341,10 +335,8 @@ class RIProtocol(StackingProtocolMixin, Protocol):
                         self.authenticationFail()
                         return
             elif self.sm.currentState() == state.ESTABLISHED:
-                print 'CP4'
                 if self.checkSessionID(msg):
                     if msg.close_flag:
-                        print 'CP5'
                         # log(errType.CHECK, 'recv close flag {0} | {1}'.format(
                         #     len(self.higherTransport.getDataBuf()), self.higherTransport.getTimer().started()))
                         self.processClose(msg)
