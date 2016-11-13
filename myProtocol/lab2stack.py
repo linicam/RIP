@@ -276,6 +276,7 @@ class RIProtocol(StackingProtocolMixin, Protocol):
         self.startTimer()
 
     def dataReceived(self, data):
+        log(errType.CHECK, "received" + str(len(data)))
         self.stopTimer()
         self.__buffer += data
         while self.__buffer:
@@ -329,6 +330,7 @@ class RIProtocol(StackingProtocolMixin, Protocol):
             elif self.sm.currentState() == state.CLOSEREQ:
                 if self.checkSessionID(msg):
                     if msg.acknowledgement_number == self.__ackNum or msg.close_flag:
+                        log(errType.CHECK, "start close")
                         self.sm.signal(signal.CLOSE_ACK, "")
                     else:
                         log(errType.TRANSMISSION,
