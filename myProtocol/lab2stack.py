@@ -284,6 +284,7 @@ class RIProtocol(StackingProtocolMixin, Protocol):
             self.__storage.update(self.__buffer[:byte])
             self.__buffer = self.__buffer[byte:]
         for msg in self.__storage.iterateMessages():
+            log(errType.CHECK, "received " + str(msg.sequence_number))
             # after handshake phase 1, got clientPubKey, then authenticate
             if (self.sm.currentState() != state.LISTENING and not self.__isClient) or \
                     (self.sm.currentState() != state.SNN_SENT and self.__isClient):
