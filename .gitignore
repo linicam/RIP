@@ -1,1 +1,3 @@
-./idea
+.idea/
+/myProtocol/CertFactory.py
+.gitignore

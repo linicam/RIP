@@ -488,7 +488,7 @@ class RIProtocol(StackingProtocolMixin, Protocol):
     def buildClosePacket(self, seqNum):
         packet = MyMessage()
         packet.sequence_number = seqNum
-        self.__ackNum == seqNum + 1
+        self.__ackNum = seqNum + 1
         packet.sessionID = self.sessionID
         packet.close_flag = True
         packet.signature = self.buildSign(packet.__serialize__())
@@ -498,6 +498,7 @@ class RIProtocol(StackingProtocolMixin, Protocol):
         msgToSend = MyMessage()
         msgToSend.sequence_number = self.__initialSN
         msgToSend.sequence_number_notification_flag = True
+        msgToSend.sessionID = ""
         msgToSend.reset_flag = True
         if self.__isClient:
             msgToSend.certificate = [str(self.__nonce), self.myCertData, self.CACertData]
